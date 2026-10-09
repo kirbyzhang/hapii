@@ -200,6 +200,10 @@ export class SyncEngine {
     private readonly piUnexpectedTempOriginalIds = new Map<string, string>()
     /** Serialize scratchlist uploads per session so disk-byte caps cannot race. */
     private readonly scratchlistUploadTails = new Map<string, Promise<unknown>>()
+    /** Keep archive completion and intentional reopen in the same session order. */
+    private readonly sessionLifecycleTails = new Map<string, Promise<unknown>>()
+    /** A lost CLI connection is not proof that its process stopped. */
+    private readonly sessionArchiveUnconfirmedIds = new Set<string>()
     /** Coalesce duplicate clear requests so retries cannot spawn two fresh sessions. */
     private readonly opencodeClearTails = new Map<string, Promise<ClearOpencodeSessionResult>>()
     /** Serialize fork/rewind per session so concurrent native rollbacks cannot stack. */
@@ -1732,7 +1736,51 @@ export class SyncEngine {
         }
     }
 
+    private async withSessionLifecycleLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+        const previous = this.sessionLifecycleTails.get(sessionId) ?? Promise.resolve()
+        let release!: () => void
+        const gate = new Promise<void>(resolve => { release = resolve })
+        const tail = previous.catch(() => undefined).then(() => gate)
+        this.sessionLifecycleTails.set(sessionId, tail)
+        await previous.catch(() => undefined)
+        try {
+            return await operation()
+        } finally {
+            release()
+            if (this.sessionLifecycleTails.get(sessionId) === tail) this.sessionLifecycleTails.delete(sessionId)
+        }
+    }
+
+    private inFlightResumeMessage(session: Session): string | undefined {
+        // PTY/Pi owners must reject competing retries before durable attempt
+        // reconciliation; retain their existing fail-closed behavior.
+        if (session.agentState?.startingMode === 'pty' && this.ptyResumeInFlightIds.has(session.id)) {
+            return 'PTY resume is already in progress'
+        }
+        if (session.metadata?.flavor === 'pi' && this.piResumeInFlightIds.has(session.id)) {
+            return 'Pi resume is already in progress'
+        }
+        return undefined
+    }
+
+    private unconfirmedArchiveError(sessionId: string) {
+        if (!this.sessionArchiveUnconfirmedIds.has(sessionId)) return undefined
+        return {
+            type: 'error' as const,
+            message: 'The previous stop was not confirmed. Retry archiving before reopening.',
+            code: 'resume_failed' as const,
+            rollbackSafe: false
+        }
+    }
+
     async archiveSession(sessionId: string): Promise<void> {
+        return this.withSessionLifecycleLock(sessionId, () => this.archiveSessionInternal(sessionId))
+    }
+
+    private async archiveSessionInternal(sessionId: string): Promise<void> {
+        // Keep this marker on failure, even if the CLI already disconnected.
+        // A subsequent explicit archive can confirm the stop and clear it.
+        this.sessionArchiveUnconfirmedIds.add(sessionId)
         // tiann/hapi#916 / #1910: KillSession is a session-socket RPC. A missing
         // target does not prove the runner child is dead (stale registration,
         // mid-reconnect, id rotation on resume). Always fall through to the
@@ -1851,6 +1899,7 @@ export class SyncEngine {
             this.emitCliSessionMetadataUpdate(sessionId)
         }
         this.handleSessionEnd({ sid: sessionId, time: Date.now() })
+        this.sessionArchiveUnconfirmedIds.delete(sessionId)
     }
 
     /**
@@ -1996,12 +2045,13 @@ export class SyncEngine {
         })
     }
 
-    private buildMigratorForRequest(_request: CursorMigrateToAcpRequest): CursorLegacyMigrator {
+    private buildMigratorForRequest(
+        _request: CursorMigrateToAcpRequest,
+        archiveSession: (sessionId: string) => Promise<void> = id => this.archiveSession(id)
+    ): CursorLegacyMigrator {
         const migratorOpts: CursorLegacyMigratorOptions = {}
         return new CursorLegacyMigrator(migratorOpts, {
-            archiveSession: async (sessionId) => {
-                await this.archiveSession(sessionId)
-            },
+            archiveSession,
             // NOTE: no awaitSessionInactive injection — handleSessionEnd()
             // synchronously sets cache.active=false inside archiveSession,
             // so any cache-based poll would return immediately and provide
@@ -2863,7 +2913,9 @@ export class SyncEngine {
      * Failure modes are all soft — the session is returned unchanged and the
      * caller proceeds with the legacy launcher.
      */
-    private async maybeAutoMigrateLegacyCursorSession(session: Session, namespace: string): Promise<Session> {
+    private async maybeAutoMigrateLegacyCursorSession(
+        session: Session, namespace: string, archiveSession: (sessionId: string) => Promise<void>
+    ): Promise<Session> {
         const md = session.metadata
         const flagRaw = process.env.HAPI_CURSOR_LEGACY_AUTO_MIGRATE?.trim().toLowerCase() ?? ''
         console.info('[auto-migrate] considering', {
@@ -2904,7 +2956,7 @@ export class SyncEngine {
         const flagSet = this.setCursorMigrationStateInProgress(session.id, namespace)
         let bannerCleanupNeeded = flagSet
         try {
-            const migrator = this.buildMigratorForRequest({})
+            const migrator = this.buildMigratorForRequest({}, archiveSession)
             // Codex #34 P2 (round 13): for inactive rows whose metadata
             // still reads `lifecycleState === 'running'` (e.g. orphaned by
             // a hub crash where the lifecycle transition didn't land), the
@@ -3126,6 +3178,14 @@ export class SyncEngine {
 
     async resumeSession(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode }): Promise<ResumeSessionResult> {
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
+        if (!access.ok) return this.resumeSessionInternal(sessionId, namespace, opts)
+        const pending = this.inFlightResumeMessage(access.session)
+        if (pending) return { type: 'error', message: pending, code: 'resume_failed' }
+        return this.withSessionLifecycleLock(access.sessionId, () => this.resumeSessionInternal(access.sessionId, namespace, opts))
+    }
+
+    private async resumeSessionInternal(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode }): Promise<ResumeSessionResult> {
+        const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok) {
             return {
                 type: 'error',
@@ -3133,6 +3193,9 @@ export class SyncEngine {
                 code: access.reason === 'access-denied' ? 'access_denied' : 'session_not_found'
             }
         }
+
+        const archiveError = this.unconfirmedArchiveError(access.sessionId)
+        if (archiveError) return archiveError
 
         let initialSession = access.session
         if (await this.recoverInactiveReservedClear(initialSession, namespace)) {
@@ -3180,7 +3243,13 @@ export class SyncEngine {
         // would block the post-migration ACP launcher), run the transplant
         // synchronously before resuming. The user sees the regular session
         // loading state for ~3–5s longer; the session opens as ACP.
-        const session = await this.maybeAutoMigrateLegacyCursorSession(initialSession, namespace)
+        const session = await this.maybeAutoMigrateLegacyCursorSession(initialSession, namespace, id =>
+            // Auto-migration archives its source inside this already-held
+            // lifecycle lock. Manual migration still uses the public queue.
+            id === access.sessionId ? this.archiveSessionInternal(id) : this.archiveSession(id))
+        // Auto-migration can catch a failed stop and fall back to legacy.
+        const migrationArchiveError = this.unconfirmedArchiveError(access.sessionId)
+        if (migrationArchiveError) return migrationArchiveError
 
         const targetResult = this.resolveLocalResumeTarget(access.sessionId, namespace)
         let flavor: AgentFlavor
@@ -3587,6 +3656,14 @@ export class SyncEngine {
      */
     async reopenSession(sessionId: string, namespace: string): Promise<ReopenSessionResult> {
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
+        if (!access.ok) return this.reopenSessionInternal(sessionId, namespace)
+        const pending = this.inFlightResumeMessage(access.session)
+        if (pending) return { type: 'error', message: pending, code: 'resume_failed' }
+        return this.withSessionLifecycleLock(access.sessionId, () => this.reopenSessionInternal(access.sessionId, namespace))
+    }
+
+    private async reopenSessionInternal(sessionId: string, namespace: string): Promise<ReopenSessionResult> {
+        const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok) {
             return {
                 type: 'error',
@@ -3594,6 +3671,9 @@ export class SyncEngine {
                 code: access.reason === 'access-denied' ? 'access_denied' : 'session_not_found'
             }
         }
+
+        const archiveError = this.unconfirmedArchiveError(access.sessionId)
+        if (archiveError) return archiveError
 
         let session = access.session
         if (await this.recoverInactiveReservedClear(session, namespace)) {
@@ -3680,7 +3760,7 @@ export class SyncEngine {
             // (after Pi/PTY attempt rows capture archiveSnapshot). Hub restart
             // between clear and spawn leaves a non-archived inactive row;
             // archiveSnapshot still rolls back on resume failure while alive.
-            const resumeResult = await this.resumeSession(access.sessionId, namespace)
+            const resumeResult = await this.resumeSessionInternal(access.sessionId, namespace)
             if (resumeResult.type === 'error') {
                 // Never restore archived metadata over a live Pi child. A live
                 // row blocks retry by itself and must remain visible as active.
@@ -3712,7 +3792,7 @@ export class SyncEngine {
         // Not active and not archived (e.g. brand-new session that has not yet connected,
         // or one that ended without writing archive metadata). Forward to resume so the
         // operator still gets one-click revival.
-        const resumeResult = await this.resumeSession(access.sessionId, namespace)
+        const resumeResult = await this.resumeSessionInternal(access.sessionId, namespace)
         if (resumeResult.type === 'error') {
             return resumeResult
         }
