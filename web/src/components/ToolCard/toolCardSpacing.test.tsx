@@ -81,3 +81,19 @@ describe('ToolCard detail dialog', () => {
         expect(within(dialog).getByRole('button', { name: 'Close' })).toHaveClass('top-2')
     })
 })
+
+it('renders answer controls for a completed Codex async question without permissions', () => {
+    const block: ToolCallBlock = {
+        kind: 'tool-call', id: 'question-block', localId: null, createdAt: 1, children: [],
+        tool: {
+            id: 'question', name: 'request_user_input', state: 'completed', createdAt: 1,
+            startedAt: 1, completedAt: 1, execStartedAt: null, execCompletedAt: null, description: null,
+            input: { delivery: 'async', questions: [{ id: 'q0', question: 'Choose a path', options: [{ label: 'Alpha' }] }] },
+            result: null
+        }
+    }
+    render(<I18nProvider><ToolCard api={{} as ApiClient} sessionId="session-1" metadata={null}
+        terminalToolDisplayMode="compact" disabled={false} onDone={() => {}} block={block} /></I18nProvider>)
+    expect(screen.getByRole('button', { name: 'Submit' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Alpha/ })).toBeInTheDocument()
+})

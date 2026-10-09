@@ -992,8 +992,9 @@ export class AppServerEventConverter {
                         return events;
                     }
                     const text = extractItemText(item) ?? this.agentMessageBuffers.get(itemId);
-                    if (text) {
-                        events.push(scoped({ type: 'agent_message', message: text }));
+                    if (text || (item.delivery === 'async' && Array.isArray(item.questions) && item.questions.length > 0)) {
+                        events.push(scoped({ type: 'agent_message', message: text ?? '',
+                            ...(item.delivery === 'async' ? { delivery: 'async', questions: item.questions } : {}) }));
                         this.completedAgentMessageItems.add(itemId);
                         this.agentMessageBuffers.delete(itemId);
                     }

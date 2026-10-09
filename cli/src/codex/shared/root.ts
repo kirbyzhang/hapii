@@ -487,7 +487,16 @@ export class SharedCodexRoot {
             const { localId } = z.object({ localId: z.string().min(1) }).parse(raw);
             const expectedTurnId = this.currentTurn;
             if (!expectedTurnId) return { steered: false, error: 'No active turn' };
-            return this.queue.steer(localId, expectedTurnId);
+            // The hub saves before onUserMessage has finished enqueuing. Keep
+            // steering behind that work, pinned to the turn at request time.
+            const work = this.work.catch(() => {}).then(() => {
+                if (this.closed || this.stopping || this.currentTurn !== expectedTurnId) {
+                    return { steered: false, error: 'The active turn changed before delivery' };
+                }
+                return this.queue.steer(localId, expectedTurnId);
+            });
+            this.work = work;
+            return work;
         });
         rpc.registerHandler(RPC_METHODS.ClearConversation, async () => {
             const child = await this.newConversation(); return { sessionId: child.session.sessionId };

@@ -38,6 +38,13 @@ vi.mock('../codexAppServerClient', () => ({
                 this.queue.push(entry);
                 return { queuedSubmission: entry };
             }
+            if (method === 'thread/queue/delete') {
+                const index = this.queue.findIndex(entry => entry.id === params.queuedSubmissionId);
+                if (index === -1) return { deleted: false };
+                this.queue.splice(index, 1);
+                return { deleted: true };
+            }
+            if (method === 'turn/steer') return {};
             throw new Error(`Unexpected request: ${method}`);
         }
     },
@@ -61,13 +68,15 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) 
     const updateState = vi.fn((fn: (value: AgentState) => AgentState) => { state = fn(state); });
     const rpc = new Map<string, (raw: unknown) => Promise<unknown>>();
     const send = vi.fn();
+    let receiveUserMessage: Parameters<ApiSessionClient['onUserMessage']>[0] | undefined;
     const hubArchivedListeners: Array<() => void> = [];
     const session = {
         sessionId: 'sid', getMetadata: () => metadata,
         hubArchived: opts?.hubArchived ?? false,
         updateMetadata: (fn: (value: Metadata) => Metadata) => { metadata = fn(metadata); },
         updateAgentState: updateState, keepAlive() {},
-        onUserMessage() {}, onCancelQueuedMessage() {}, onRetryQueuedMessage() {},
+        onUserMessage(fn: Parameters<ApiSessionClient['onUserMessage']>[0]) { receiveUserMessage = fn; },
+        onCancelQueuedMessage() {}, onRetryQueuedMessage() {},
         onReconnect: (fn: (() => void) | null) => { reconnect = fn; },
         on(event: string, listener: () => void) {
             if (event === 'hub-archived') hubArchivedListeners.push(listener);
@@ -99,6 +108,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) 
         emitHubArchived: () => { for (const listener of hubArchivedListeners) listener(); },
         hubArchivedListenerCount: () => hubArchivedListeners.length,
         end,
+        receiveUserMessage: (...args: Parameters<NonNullable<typeof receiveUserMessage>>) => receiveUserMessage?.(...args),
     };
 }
 
@@ -256,6 +266,35 @@ describe('shared plan actions', () => {
 });
 
 describe('shared steering availability', () => {
+    it.each([false, true])('waits for enqueue and pins the requested turn (turn changes: %s)', async changes => {
+        const f = await fixture();
+        await f.root.activate();
+        f.native.notify('turn/started', { threadId: 'thread', turn: { id: 'turn-a' } });
+        let release!: () => void;
+        const barrier = new Promise<void>(resolve => { release = resolve; });
+        const original = f.root.client.request.bind(f.root.client);
+        const requests = vi.spyOn(f.root.client, 'request').mockImplementation(async (method, params) => {
+            if (method === 'thread/queue/add') await barrier;
+            return original(method, params);
+        });
+        f.receiveUserMessage({ role: 'user', content: { type: 'text', text: 'My answer' } }, 'answer');
+        const steered = f.rpc.get(RPC_METHODS.SteerQueuedMessage)!({ localId: 'answer' });
+        await vi.waitFor(() => expect(requests.mock.calls.some(([method]) => method === 'thread/queue/add')).toBe(true));
+        expect(requests.mock.calls.some(([method]) => method === 'turn/steer')).toBe(false);
+        if (changes) {
+            f.native.notify('turn/completed', { threadId: 'thread', turn: { id: 'turn-a', status: 'completed' } });
+            f.native.notify('turn/started', { threadId: 'thread', turn: { id: 'turn-b' } });
+        }
+        release();
+        expect(await steered).toMatchObject({ steered: !changes });
+        const calls = requests.mock.calls.filter(([method]) => method === 'turn/steer');
+        if (changes) {
+            expect(calls).toHaveLength(0);
+            expect(f.native.queue).toHaveLength(1);
+        } else {
+            expect(calls).toEqual([['turn/steer', expect.objectContaining({ expectedTurnId: 'turn-a', clientUserMessageId: 'answer' })]]);
+        }
+    });
     it('keeps idle sessions online without polling usage or publishing agent-state updates', async () => {
         const f = await fixture();
         const requests = vi.spyOn(f.root.client, 'request');

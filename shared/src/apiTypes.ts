@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { AsyncQuestionAnswerSchema } from './asyncUserInput'
 import {
     AttachmentMetadataSchema,
     CodexCollaborationModeSchema,
@@ -544,7 +545,8 @@ export const SendMessageRequestSchema = z.object({
     localId: z.string().min(1).optional(),
     attachments: z.array(AttachmentMetadataSchema).optional(),
     scheduledAt: z.number().int().positive().nullable().optional(),
-    deliveryMode: MessageDeliveryModeSchema.optional()
+    deliveryMode: MessageDeliveryModeSchema.optional(),
+    asyncQuestionAnswer: AsyncQuestionAnswerSchema.optional()
 }).refine(
     (data) => data.scheduledAt == null || typeof data.localId === 'string',
     { message: 'scheduledAt requires localId', path: ['localId'] }

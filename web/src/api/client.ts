@@ -1,3 +1,4 @@
+import type { AsyncQuestionAnswer } from '@hapi/protocol/asyncUserInput'
 import type {
     AttachmentMetadata,
     AuthResponse,
@@ -529,6 +530,7 @@ export class ApiClient {
         attachments?: AttachmentMetadata[],
         scheduledAt?: number | null,
         deliveryMode?: MessageDeliveryMode,
+        asyncQuestionAnswer?: AsyncQuestionAnswer,
     ): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
             method: 'POST',
@@ -538,6 +540,7 @@ export class ApiClient {
                 attachments: attachments ?? undefined,
                 scheduledAt: scheduledAt ?? undefined,
                 deliveryMode: deliveryMode ?? undefined,
+                asyncQuestionAnswer,
             })
         })
     }

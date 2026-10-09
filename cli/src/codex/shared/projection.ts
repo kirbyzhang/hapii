@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ApiSessionClient } from '@/api/apiSession';
 import { normalizeSessionDisplayTitle } from '@/agent/sessionDisplayRename';
+import { normalizeAsyncUserInputQuestions } from '@hapi/protocol/asyncUserInput';
 import { registerGeneratedImageFromPath } from '@/modules/common/generatedImages';
 import { AppServerEventConverter } from '../utils/appServerEventConverter';
 import { record, string } from './gateway';
@@ -126,7 +127,18 @@ export class SharedCodexProjection {
         for (const event of events) {
             const callId = string(event.call_id);
             const key = `${turnId ?? 'thread'}:${itemId ?? callId ?? createHash('sha256').update(JSON.stringify(event)).digest('hex')}:${event.type}`;
-            if (event.type === 'agent_message') this.send({ type: 'message', message: event.message }, key);
+            if (event.type === 'agent_message') {
+                if (event.message) this.send({ type: 'message', message: event.message }, key);
+                const questions = event.delivery === 'async' ? normalizeAsyncUserInputQuestions(event.questions) : [];
+                if (questions.length && itemId && turnId) {
+                    const callId = `codex-async-question:${this.threadId}:${turnId}:${itemId}`;
+                    this.send({ type: 'tool-call', name: 'request_user_input', callId,
+                        input: { delivery: 'async', threadId: this.threadId,
+                            ...(this.parentThreadId ? { parentThreadId: this.parentThreadId } : {}), questions } }, `${key}:question`);
+                    // Publishing the question is complete; answering it is a separate user message.
+                    this.send({ type: 'tool-call-result', callId, output: null }, `${key}:question:result`);
+                }
+            }
             else if (event.type === 'agent_reasoning') this.send({ type: 'reasoning', message: event.text }, key);
             else if (event.type === 'exec_command_begin' && callId) {
                 this.send({ type: 'tool-call', name: 'CodexBash', callId, input: event }, key);
@@ -194,7 +206,13 @@ export class SharedCodexProjection {
                 await this.project('item/started', params);
                 // Active snapshots can contain partial assistant text. Do not
                 // settle it under the final stable id and suppress completion.
-                if (turn.status !== 'inProgress' || record(item).status === 'completed' || record(item).type === 'userMessage') {
+                const snapshotItem = record(item);
+                // Async questions are published as complete items, even while
+                // their enclosing turn keeps running. V2 agentMessage has no
+                // status field, so waiting for the turn can hide the question.
+                const publishedQuestion = snapshotItem.type === 'agentMessage' && snapshotItem.delivery === 'async'
+                    && normalizeAsyncUserInputQuestions(snapshotItem.questions).length > 0;
+                if (turn.status !== 'inProgress' || snapshotItem.status === 'completed' || snapshotItem.type === 'userMessage' || publishedQuestion) {
                     if (!this.parentThreadId) {
                         const title = successfulTitle(record(item));
                         if (title && string(record(item).id)) {

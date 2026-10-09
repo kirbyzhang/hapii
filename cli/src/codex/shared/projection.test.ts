@@ -4,6 +4,62 @@ import { SharedCodexProjection, inputText } from './projection';
 import { codexPlanProposalId } from './plan';
 
 describe('shared history projection', () => {
+    it.each([undefined, 'root'])('preserves async questions as durable non-permission cards (parent: %s)', async parentThreadId => {
+        const send = vi.fn();
+        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+        const projection = new SharedCodexProjection(session, 'thread', async () => {}, parentThreadId);
+        const item = { id: 'question', type: 'agentMessage', text: 'Choose a value', delivery: 'async',
+            questions: [{ title: 'Choose a value', options: ['One', 'Two'] }] };
+        const params = { threadId: 'thread', turnId: 'turn', item };
+        await projection.notification('item/completed', params);
+        await projection.notification('item/completed', params);
+        const bodies = send.mock.calls.map(([body]) => parentThreadId ? body.message : body);
+        expect(bodies).toHaveLength(3);
+        expect(bodies[0]).toMatchObject({ type: 'message', message: 'Choose a value' });
+        expect(bodies[1]).toMatchObject({ type: 'tool-call', name: 'request_user_input',
+            callId: 'codex-async-question:thread:turn:question', input: { delivery: 'async', threadId: 'thread',
+                questions: [{ id: 'q0', question: 'Choose a value', isOther: true,
+                    options: [{ label: 'One', description: '' }, { label: 'Two', description: '' }] }] } });
+        expect(bodies[1].input.parentThreadId).toBe(parentThreadId);
+        expect(bodies[2]).toMatchObject({ type: 'tool-call-result', output: null });
+        const original = [...send.mock.calls];
+        projection.reset(); send.mockClear();
+        await projection.history({ turns: [{ id: 'turn', status: 'completed', items: [item] }] });
+        expect(send.mock.calls).toEqual(original);
+    });
+    it('retains ordinary text when async question data is malformed', async () => {
+        const send = vi.fn();
+        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+        const projection = new SharedCodexProjection(session, 'thread', async () => {});
+        await projection.notification('item/completed', { threadId: 'thread', turnId: 'turn',
+            item: { id: 'question', type: 'agentMessage', text: 'Still readable', delivery: 'async', questions: [{ title: '' }] } });
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0][0]).toMatchObject({ type: 'message', message: 'Still readable' });
+    });
+    it('renders a question-only async item without an empty chat message', async () => {
+        const send = vi.fn();
+        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+        const projection = new SharedCodexProjection(session, 'thread', async () => {});
+        await projection.notification('item/completed', { threadId: 'thread', turnId: 'turn',
+            item: { id: 'question', type: 'agentMessage', text: '', delivery: 'async', questions: [{ title: 'Your preference?' }] } });
+        expect(send.mock.calls.map(([body]) => body.type)).toEqual(['tool-call', 'tool-call-result']);
+        expect(send.mock.calls[0][0].input.questions[0].question).toBe('Your preference?');
+    });
+    it('restores a published async question during an active turn without settling streaming text', async () => {
+        const send = vi.fn();
+        const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;
+        const projection = new SharedCodexProjection(session, 'thread', async () => {});
+        const question = { id: 'question', type: 'agentMessage', text: 'Choose', delivery: 'async',
+            questions: [{ title: 'Which option?', options: ['One', 'Two'] }] };
+        await projection.history({ turns: [{ id: 'turn', status: 'inProgress', items: [question,
+            { id: 'stream', type: 'agentMessage', text: 'Partial' }] }] });
+        expect(send.mock.calls.map(([body]) => body.type)).toEqual(['message', 'tool-call', 'tool-call-result']);
+        await projection.notification('item/completed', { threadId: 'thread', turnId: 'turn', item: question });
+        expect(send).toHaveBeenCalledTimes(3);
+        await projection.notification('item/completed', { threadId: 'thread', turnId: 'turn',
+            item: { id: 'stream', type: 'agentMessage', text: 'Final' } });
+        expect(send.mock.lastCall?.[0]).toMatchObject({ type: 'message', message: 'Final' });
+    });
     it.each([undefined, 'root'])('persists proposals without approval and replays the same IDs (parent: %s)', async parentThreadId => {
         const send = vi.fn();
         const session = { getMetadata: () => ({}), sendAgentMessage: send } as unknown as ApiSessionClient;

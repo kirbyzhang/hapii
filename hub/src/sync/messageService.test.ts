@@ -995,6 +995,20 @@ describe('MessageService.cancelQueuedMessage — future-scheduled message', () =
 // ---------------------------------------------------------------------------
 
 describe('MessageService.sendMessage with scheduledAt', () => {
+    it('keeps async answer metadata through retry and native transcript replay', async () => {
+        const store = makeStore();
+        const session = makeSession(store, 'async-answer');
+        const service = new MessageService(store, makeNoopIo(), makePublisher() as any);
+        const asyncQuestionAnswer = { questionId: 'question', answers: { q0: { answers: ['One'] } } };
+        await service.sendMessage(session.id, { text: 'Choose: One', localId: 'async-answer', asyncQuestionAnswer });
+        await service.sendMessage(session.id, { text: 'Choose: Two', localId: 'async-answer',
+            asyncQuestionAnswer: { questionId: 'question', answers: { q0: { answers: ['Two'] } } } });
+        store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'Choose: One' }, meta: { sentFrom: 'cli' } }, 'async-answer');
+        const messages = store.messages.getMessages(session.id, 10);
+        expect(messages).toHaveLength(1);
+        expect(messages[0].content).toMatchObject({ role: 'user', content: { text: 'Choose: One' }, meta: { asyncQuestionAnswer } });
+        store.close();
+    });
     function makeNoopIo(): Server {
         let emittedUpdates: unknown[] = []
         return {

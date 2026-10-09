@@ -1444,11 +1444,17 @@ function SessionChatInner(props: SessionChatProps) {
         return normalized
     }, [goalStateSourceMessages])
 
+    const asyncQuestionAnswerMessages = useMemo(() => props.messages.flatMap((message) => {
+        const normalized = normalizeDecryptedMessage(message)
+        return normalized?.role === 'user' ? [normalized] : []
+    }), [props.messages])
+
     const reduced = useMemo(
         () => reduceChatBlocks(normalizedMessages, props.session.agentState, {
-            goalStateMessages: normalizedGoalStateMessages
+            goalStateMessages: normalizedGoalStateMessages,
+            asyncQuestionAnswerMessages
         }),
-        [normalizedMessages, normalizedGoalStateMessages, props.session.agentState]
+        [normalizedMessages, normalizedGoalStateMessages, asyncQuestionAnswerMessages, props.session.agentState]
     )
     const reconciled = useMemo(
         () => reconcileChatBlocks(reduced.blocks, blocksByIdRef.current),

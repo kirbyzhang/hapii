@@ -264,6 +264,25 @@ describe('POST /api/sessions/:id/messages — #2 scheduledAt upper bound', () =>
 })
 
 describe('POST /api/sessions/:id/messages — deliveryMode', () => {
+    it('forwards async answers as ordinary user messages', async () => {
+        const { app, sentMessages } = createApp({});
+        const asyncQuestionAnswer = { questionId: 'question', answers: { q0: { answers: ['One'] } } };
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'Choose: One', localId: 'answer', asyncQuestionAnswer })
+        });
+        expect(response.status).toBe(200);
+        expect(sentMessages[0].payload).toMatchObject({ text: 'Choose: One', asyncQuestionAnswer });
+    });
+    it('rejects malformed async answers before delivery', async () => {
+        const { app, sentMessages } = createApp({});
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'One', asyncQuestionAnswer: { questionId: 'question', answers: { q0: ['One'] } } })
+        });
+        expect(response.status).toBe(400);
+        expect(sentMessages).toHaveLength(0);
+    });
     it('forwards an immediate steer intent to the hub', async () => {
         const { app, sentMessages } = createApp({})
 

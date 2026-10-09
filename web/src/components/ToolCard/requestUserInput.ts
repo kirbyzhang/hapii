@@ -1,4 +1,5 @@
 import { isObject } from '@hapi/protocol'
+import type { AsyncQuestionAnswer } from '@hapi/protocol/asyncUserInput'
 
 // Codex's wire value, never a localized display label.
 export const REQUEST_USER_INPUT_OTHER = 'None of the above'
@@ -41,6 +42,27 @@ export type RequestUserInputAnswers = Record<string, { answers: string[] }>
 
 export function isRequestUserInputToolName(toolName: string): boolean {
     return toolName === 'request_user_input'
+}
+
+export function isAsyncRequestUserInput(input: unknown): boolean {
+    return isObject(input) && input.delivery === 'async'
+}
+
+export function isChildAsyncRequestUserInput(input: unknown): boolean {
+    return isAsyncRequestUserInput(input) && isObject(input) && typeof input.parentThreadId === 'string'
+}
+
+export function formatAsyncQuestionAnswerMessage(
+    questions: RequestUserInputQuestion[],
+    answers: AsyncQuestionAnswer['answers']
+): string {
+    return questions.map((question) => {
+        const values = answers[question.id]?.answers ?? []
+        const text = values.map((value) => value.startsWith('user_note: ')
+            && !question.options.some((option) => option.label === value)
+            ? value.slice(11) : value).join('\n')
+        return `${question.question || question.id}\n${text}`
+    }).join('\n\n')
 }
 
 export function openRequestUserInputUrl(url: string): boolean {

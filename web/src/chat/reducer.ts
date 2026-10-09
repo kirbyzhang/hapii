@@ -1,3 +1,6 @@
+import { AsyncQuestionAnswerSchema } from '@hapi/protocol/asyncUserInput'
+import { isObject } from '@hapi/protocol'
+import type { ChatToolCall } from '@/chat/types'
 import type { AgentState } from '@/types/api'
 import type { AgentEvent, ChatBlock, NormalizedMessage, UsageData } from '@/chat/types'
 import type { ThreadGoal } from '@/types/api'
@@ -49,6 +52,7 @@ export type LatestUsage = {
 
 export type ReduceChatBlocksOptions = {
     goalStateMessages?: NormalizedMessage[]
+    asyncQuestionAnswerMessages?: NormalizedMessage[]
 }
 
 function getLatestThreadGoal(normalized: NormalizedMessage[]): ThreadGoal | null {
@@ -105,6 +109,33 @@ function filterSilentGoalBlocks(blocks: ChatBlock[]): ChatBlock[] {
     }
 
     return filtered
+}
+
+// Derive answer state from durable user rows, including rows still in the queue.
+// Rebuild on every reduction so canceling a queued answer restores the question.
+function applyAsyncQuestionAnswers(blocks: ChatBlock[], messages: NormalizedMessage[]): void {
+    const answers = new Map<string, NonNullable<ChatToolCall['asyncAnswer']>>()
+    for (const message of messages) {
+        if (message.role !== 'user' || message.status === 'failed' || !isObject(message.meta)) continue
+        const parsed = AsyncQuestionAnswerSchema.safeParse(message.meta.asyncQuestionAnswer)
+        if (!parsed.success) continue
+        answers.set(parsed.data.questionId, {
+            answers: parsed.data.answers,
+            status: message.invokedAt != null ? 'answered'
+                : message.deliveryState === 'indeterminate' ? 'indeterminate' : 'queued'
+        })
+    }
+    const visit = (entries: ChatBlock[]) => {
+        for (const block of entries) {
+            if (block.kind !== 'tool-call') continue
+            if (block.tool.name === 'request_user_input' && isObject(block.tool.input)
+                && block.tool.input.delivery === 'async') {
+                block.tool.asyncAnswer = answers.get(block.tool.id)
+            }
+            visit(block.children)
+        }
+    }
+    visit(blocks)
 }
 
 export function reduceChatBlocks(
@@ -173,6 +204,8 @@ export function reduceChatBlocks(
             permission: entry.permission
         })
     }
+
+    applyAsyncQuestionAnswers(rootResult.blocks, options.asyncQuestionAnswerMessages ?? normalized)
 
     // Calculate latest usage from messages (find the most recent message with usage data)
     let latestUsage: LatestUsage | null = null

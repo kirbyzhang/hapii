@@ -1,3 +1,4 @@
+import type { AsyncQuestionAnswer } from '@hapi/protocol/asyncUserInput'
 import type { AttachmentMetadata, MessageStatus } from '@/types/api'
 import type { ThreadGoal } from '@/types/api'
 import type { InlineMediaSource } from '@/chat/inlineMediaSource'
@@ -161,6 +162,7 @@ export type NormalizedMessage = ({
     meta?: unknown
     usage?: UsageData
     status?: MessageStatus
+    deliveryState?: 'indeterminate'
     originalText?: string
     invokedAt?: number | null
     model?: string | null
@@ -214,6 +216,10 @@ export type ChatToolCall = {
     nativeKind?: string | null
     result?: unknown
     permission?: ToolPermission
+    asyncAnswer?: {
+        answers: AsyncQuestionAnswer['answers']
+        status: 'queued' | 'answered' | 'indeterminate'
+    }
 }
 
 export type UserTextBlock = {

@@ -359,3 +359,23 @@ describe('ApiClient Kimi session model discovery', () => {
         expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session%2F1/kimi-models')
     })
 })
+
+describe('ApiClient async question answers', () => {
+    it('posts answer metadata through the ordinary message endpoint', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
+        const originalFetch = globalThis.fetch
+        globalThis.fetch = fetchMock
+        try {
+            const api = new ApiClient('test-token')
+            const asyncQuestionAnswer = { questionId: 'question-1', answers: { q0: { answers: ['Alpha'] } } }
+            await api.sendMessage('session-1', 'Choose\nAlpha', 'codex-async-answer:question-1', undefined, undefined, undefined, asyncQuestionAnswer)
+            expect(fetchMock).toHaveBeenCalledTimes(1)
+            const [url, options] = fetchMock.mock.calls[0]
+            expect(url).toContain('/api/sessions/session-1/messages')
+            expect(options.method).toBe('POST')
+            expect(JSON.parse(options.body)).toEqual({ text: 'Choose\nAlpha', localId: 'codex-async-answer:question-1', asyncQuestionAnswer })
+        } finally {
+            globalThis.fetch = originalFetch
+        }
+    })
+})
