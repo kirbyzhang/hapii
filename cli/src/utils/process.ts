@@ -96,6 +96,36 @@ export function getProcessStartMarker(pid: number): string | null {
   return result.stdout?.toString().trim() || null;
 }
 
+/** Read generations together without starting one ps process per runtime. */
+export function getProcessStartMarkers(pids: number[]): Map<number, string> {
+  const candidates = [...new Set(pids)].filter(pid => Number.isInteger(pid) && pid > 0);
+  const markers = new Map<number, string>();
+  if (isWindows()) {
+    for (const pid of candidates) {
+      const marker = getProcessStartMarker(pid);
+      if (marker) markers.set(pid, marker);
+    }
+    return markers;
+  }
+  // Bound argv size even for a large registry. Failed/partial scans leave
+  // markers unknown; callers must still check liveness and fail closed.
+  for (let offset = 0; offset < candidates.length; offset += 256) {
+    const batch = candidates.slice(offset, offset + 256);
+    const result = spawn.sync('ps', ['-p', batch.join(','), '-o', 'pid=,lstart='], {
+      stdio: 'pipe',
+      env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+      timeout: SPAWN_SYNC_TIMEOUT_MS,
+    });
+    if (result.error || result.status !== 0) continue;
+    const requested = new Set(batch);
+    for (const line of (result.stdout?.toString() ?? '').split('\n')) {
+      const match = line.trim().match(/^(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})$/);
+      if (match && requested.has(Number(match[1]))) markers.set(Number(match[1]), match[2]);
+    }
+  }
+  return markers;
+}
+
 // ponytail: ps -p is cheap and avoids PID-reuse false positives after OS upgrades/reboots
 function isRunnerCommand(commandLine: string): boolean {
   return /(?:^|\s)runner(?:\s|$)/.test(commandLine) && /(?:^|\s)start-sync(?:\s|$)/.test(commandLine);

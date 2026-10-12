@@ -10,7 +10,7 @@ vi.mock('cross-spawn', () => ({
     }
 }))
 
-import { getHapiRunnerProcessIdentity, killProcess } from './process'
+import { getHapiRunnerProcessIdentity, getProcessStartMarker, getProcessStartMarkers, killProcess } from './process'
 
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
 
@@ -39,6 +39,58 @@ function unavailable(command: string) {
         error
     }
 }
+
+describe('batched process generation markers', () => {
+    beforeEach(() => {
+        setPlatform('linux')
+        spawnSyncMock.mockReset()
+        vi.spyOn(process, 'kill').mockReturnValue(true)
+    })
+    afterEach(() => {
+        vi.restoreAllMocks()
+        if (originalPlatformDescriptor) Object.defineProperty(process, 'platform', originalPlatformDescriptor)
+    })
+
+    it('preserves single-probe lstart formatting and rejects unrequested or malformed rows', () => {
+        const marker = 'Fri Oct  9 11:22:33 2026'
+        spawnSyncMock.mockImplementation((_cmd, args) => completed(args[3] === 'lstart='
+            ? `${marker}\n`
+            : `   111 ${marker}\n112 bad marker\n999 Fri Oct  9 11:22:33 2026\n`))
+        expect(getProcessStartMarkers([111, 112])).toEqual(new Map([[111, getProcessStartMarker(111)]]))
+        expect(spawnSyncMock.mock.calls[0][2]).toMatchObject({ env: { LC_ALL: 'C', TZ: 'UTC' }, timeout: 10000 })
+    })
+    it('deduplicates and rejects invalid PID values without unnecessary probes', () => {
+        spawnSyncMock.mockReturnValue(completed('111 Fri Oct  9 11:22:33 2026\n'))
+        expect(getProcessStartMarkers([]).size).toBe(0)
+        expect(spawnSyncMock).not.toHaveBeenCalled()
+        expect(getProcessStartMarkers([111, 111, 0, -1, 1.5, NaN, Infinity]).size).toBe(1)
+        expect(spawnSyncMock).toHaveBeenCalledTimes(1)
+        expect(spawnSyncMock.mock.calls[0][1]).toEqual(['-p', '111', '-o', 'pid=,lstart='])
+    })
+    it('leaves failed and missing generations unknown, while accepting a later successful batch', () => {
+        const pids = Array.from({ length: 257 }, (_, index) => index + 1)
+        spawnSyncMock.mockReturnValueOnce(unavailable('ps')).mockReturnValueOnce(completed('257 Fri Oct  9 11:22:33 2026\n'))
+        expect(getProcessStartMarkers(pids)).toEqual(new Map([[257, 'Fri Oct  9 11:22:33 2026']]))
+        expect(spawnSyncMock).toHaveBeenCalledTimes(2)
+        expect(spawnSyncMock.mock.calls[0][1][1].split(',')).toHaveLength(256)
+        expect(spawnSyncMock.mock.calls[1][1][1]).toBe('257')
+    })
+    it('does not trust stdout from a failed ps scan', () => {
+        spawnSyncMock.mockReturnValue(completed('111 Fri Oct  9 11:22:33 2026\n', 1))
+        expect(getProcessStartMarkers([111]).size).toBe(0)
+    })
+    it('retains Windows tasklist and UTC CIM generation probes', () => {
+        setPlatform('win32')
+        const marker = '2026-10-09T11:22:33.0000000Z'
+        spawnSyncMock.mockImplementation((cmd, args) => cmd === 'tasklist'
+            ? completed(`hapi.exe ${args[1].slice(7)} Console 1 200 K`)
+            : completed(marker))
+        expect(getProcessStartMarkers([111, 111, 222])).toEqual(new Map([[111, marker], [222, marker]]))
+        expect(spawnSyncMock.mock.calls.filter(call => call[0] === 'powershell')).toHaveLength(2)
+        expect(spawnSyncMock.mock.calls.some(call => call[0] === 'ps')).toBe(false)
+        expect(spawnSyncMock.mock.calls.find(call => call[0] === 'powershell')?.[1][3]).toContain("ToUniversalTime().ToString('o')")
+    })
+})
 
 describe('getHapiRunnerProcessIdentity on Windows', () => {
     beforeAll(() => {

@@ -41,7 +41,7 @@ import { join } from 'path';
 import { buildMachineMetadata } from '@/agent/sessionFactory';
 import { resolveWorkspaceRoots } from '@/utils/workspaceRoot';
 import { hashRunnerCliApiToken, hashRunnerExtraHeaders } from './runnerIdentity';
-import { readRuntimes, runtimeMayBeAlive, runtimeAuthHash } from '@/codex/shared/registry';
+import { readRuntimes, filterRuntimesThatMayBeAlive, runtimeAuthHash } from '@/codex/shared/registry';
 import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewarm';
 import { isLinkedGitWorktree } from '@/utils/isLinkedGitWorktree';
 import { agentUnavailableMessage, getAgentAvailability } from '@/agent/agentAvailability';
@@ -1123,11 +1123,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
       const readLiveRuntimesForStop = async () => {
         try {
-          return (await readRuntimes({ strict: true })).filter(runtime =>
+          return filterRuntimesThatMayBeAlive((await readRuntimes({ strict: true })).filter(runtime =>
             runtime.hub === configuration.apiUrl
             && runtime.authHash === runtimeAuthHash()
-            && runtimeMayBeAlive(runtime)
-          );
+          ));
         } catch (error) {
           logger.warn(
             `[RUNNER RUN] Codex runtime registry unreadable during stop of ${sessionId}: ${
