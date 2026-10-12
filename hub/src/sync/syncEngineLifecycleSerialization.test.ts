@@ -24,6 +24,7 @@ describe('SyncEngine per-session lifecycle serialization', () => {
     beforeEach(() => {
         store = new Store(':memory:')
         engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        ;(engine as unknown as { archiveStopConfirmationTimeoutMs: number }).archiveStopConfirmationTimeoutMs = 0
         const internals = engine as unknown as {
             sessionCache: SessionCache
             rpcGateway: RpcGateway
@@ -111,6 +112,37 @@ describe('SyncEngine per-session lifecycle serialization', () => {
             expect(store.messages.getMessages(id, 10)).toEqual(history)
         })
     }
+
+    it('keeps reopen behind all unknown-stop retries and sends KillSession once', async () => {
+        const id = insert('retry-then-reopen')
+        ;(engine as unknown as { archiveStopConfirmationTimeoutMs: number }).archiveStopConfirmationTimeoutMs = 3000
+        const firstEntered = deferred<void>()
+        const finalEntered = deferred<void>()
+        const release = deferred<'already_gone'>()
+        let kills = 0
+        let confirmations = 0
+        gateway.killSession = async () => { kills++; return {} }
+        gateway.stopRunnerSession = async () => {
+            engine.handleSessionEnd({ sid: id, time: Date.now() })
+            confirmations++
+            if (confirmations === 1) { firstEntered.resolve(); return 'unknown' }
+            finalEntered.resolve()
+            return release.promise
+        }
+        const archive = engine.archiveSession(id)
+        await firstEntered.promise
+        const reopen = engine.reopenSession(id, 'default')
+        await finalEntered.promise
+        const spawnsBeforeFinalConfirmation = spawned.length
+        release.resolve('already_gone')
+        await archive
+        const result = await reopen
+        expect(spawnsBeforeFinalConfirmation).toBe(0)
+        expect(result).toMatchObject({ type: 'success', sessionId: id })
+        expect(kills).toBe(1)
+        expect(confirmations).toBe(2)
+        expect(spawned).toEqual([id])
+    })
 
     it('coalesces two ordinary Codex reopens into one spawn', async () => {
         const id = insert('duplicate', true)

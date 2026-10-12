@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { Hono } from 'hono'
+import { SessionArchiveStopUnconfirmedError } from '../../sync/sessionArchiveStop'
 import type { Session, SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
 import { createSessionsRoutes } from './sessions'
@@ -63,6 +64,7 @@ function createApp(session: Session, opts?: {
     getSessionExport?: (sessionId: string, session: Session, options?: { force?: boolean }) => unknown
     sessionExists?: boolean
     archiveSession?: (sessionId: string) => Promise<void>
+    isSessionArchiveUnconfirmed?: (sessionId: string) => boolean
     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
     listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
     forkConversation?: SyncEngine['forkConversation']
@@ -159,6 +161,7 @@ function createApp(session: Session, opts?: {
             status: { onDisk: true, store: 'acp' as const }
         })),
         archiveSession: archiveSessionMock,
+        isSessionArchiveUnconfirmed: opts?.isSessionArchiveUnconfirmed ?? (() => false),
         setSessionPinned: opts?.setSessionPinned ?? (() => {}),
         setSessionPinMode: opts?.setSessionPinMode ?? (() => {}),
         getSessionExport: opts?.getSessionExport ?? (() => ({
@@ -1426,6 +1429,30 @@ describe('sessions routes', () => {
     // rows and for split-brain rows whose CLI is gone but the in-memory `active`
     // flag has not been reconciled to false yet.
     describe('POST /sessions/:id/archive (tiann/hapi#916)', () => {
+        for (const lifecycleState of ['archived', undefined] as const) {
+            it(`rechecks stop confirmation for an inactive unconfirmed row (${lifecycleState ?? 'no lifecycle'})`, async () => {
+                const session = createSession({ active: false, metadata: {
+                    path: '/tmp/project', host: 'localhost', flavor: 'codex', lifecycleState
+                } })
+                const calls: string[] = []
+                const { app } = createApp(session, {
+                    isSessionArchiveUnconfirmed: id => id === session.id,
+                    archiveSession: async id => { calls.push(id) }
+                })
+                const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
+                expect(response.status).toBe(200)
+                expect(await response.json()).toEqual({ ok: true })
+                expect(calls).toEqual(['session-1'])
+            })
+        }
+        it('returns a retryable 409 for unconfirmed stop, retaining DB failure as 500', async () => {
+            const { app } = createApp(createSession(), {
+                archiveSession: async () => { throw new SessionArchiveStopUnconfirmedError() }
+            })
+            const response = await app.request('/api/sessions/session-1/archive', { method: 'POST' })
+            expect(response.status).toBe(409)
+            expect(await response.json()).toEqual({ error: new SessionArchiveStopUnconfirmedError().message })
+        })
         it('returns 2xx and calls archiveSession for an active session', async () => {
             const calls: string[] = []
             const session = createSession({ active: true })

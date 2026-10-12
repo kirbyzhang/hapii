@@ -30,6 +30,7 @@ import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
 import { Hono, type Context } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
+import { SessionArchiveStopUnconfirmedError } from '../../sync/sessionArchiveStop'
 import type { WebAppEnv } from '../middleware/auth'
 import { loadScratchlistAttachmentLimitsFromEnv } from '../../config/scratchlistAttachmentLimits'
 import { validateScratchlistAttachmentsForWrite, scratchlistSessionBytesBeforeForPut } from '../../scratchlistAttachments/validate'
@@ -451,18 +452,26 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         const lifecycleState = sessionResult.session.metadata?.lifecycleState
-        if (!sessionResult.session.active && lifecycleState === 'archived') {
+        const stopUnconfirmed = engine.isSessionArchiveUnconfirmed(sessionResult.sessionId)
+        if (!sessionResult.session.active && lifecycleState === 'archived' && !stopUnconfirmed) {
             return c.json({ ok: true, alreadyArchived: true })
         }
 
         // tiann/hapi#1820: `idle` is a live lifecycle too — a session the hub
         // reconciled as keepalive-only must stay archivable once its socket
         // finally drops, exactly like a stale `running` row.
-        if (!sessionResult.session.active && !isLiveLifecycleState(lifecycleState)) {
+        if (!sessionResult.session.active && !isLiveLifecycleState(lifecycleState) && !stopUnconfirmed) {
             return c.json({ error: 'Session is inactive' }, 409)
         }
 
-        await engine.archiveSession(sessionResult.sessionId)
+        try {
+            await engine.archiveSession(sessionResult.sessionId)
+        } catch (error) {
+            if (error instanceof SessionArchiveStopUnconfirmedError) {
+                return c.json({ error: error.message }, 409)
+            }
+            throw error
+        }
         return c.json({ ok: true })
     })
 

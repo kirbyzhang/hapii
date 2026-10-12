@@ -34,6 +34,7 @@ import { createTitleSuggestionService, type TitleSuggestionService } from './tit
 import { selectForkTranscriptPrefix } from './forkTranscript'
 import { buildForkSessionSummary } from './forkSessionSummary'
 import { isMachineSpawnPreallocatedStub } from '../store/sessions'
+import { confirmSessionArchiveStop, SessionArchiveStopUnconfirmedError, type SessionStopStatus } from './sessionArchiveStop'
 import {
     RpcGateway,
     RpcTargetMissingError,
@@ -179,6 +180,7 @@ function extractClaudeUserMessageTextFromAgentOutput(content: unknown): string |
 }
 
 export class SyncEngine {
+    private readonly archiveStopConfirmationTimeoutMs = 3_000
     private readonly eventPublisher: EventPublisher
     private readonly sessionCache: SessionCache
     private readonly machineCache: MachineCache
@@ -1777,6 +1779,10 @@ export class SyncEngine {
         return this.withSessionLifecycleLock(sessionId, () => this.archiveSessionInternal(sessionId))
     }
 
+    isSessionArchiveUnconfirmed(sessionId: string): boolean {
+        return this.sessionArchiveUnconfirmedIds.has(sessionId)
+    }
+
     private async archiveSessionInternal(sessionId: string): Promise<void> {
         // Keep this marker on failure, even if the CLI already disconnected.
         // A subsequent explicit archive can confirm the stop and clear it.
@@ -1806,73 +1812,76 @@ export class SyncEngine {
         const runnerSpawned = sessionMeta?.startedBy === 'runner'
             || sessionMeta?.startedFromRunner === true
         if (machineId && runnerSpawned) {
-            let status: 'stopped' | 'already_gone' | 'still_alive' | 'unknown'
-            try {
-                status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
-            } catch (stopError) {
-                // Machine RPC missing is NOT proof the detached CLI is gone
-                // (KillMode=process children survive runner death). Refuse to
-                // archive on any StopSession failure — including when KillSession
-                // was also unreachable. Both targets missing still leaves a
-                // possible live orphan; retry StopSession when the runner
-                // reconnects (#1911 bot Major).
-                void stopError
-                status = 'still_alive'
-            }
-            // KillSession acknowledges before cleanupAndExit finishes, and socket
-            // loss is not exit proof. When the runner cannot find the HAPI id,
-            // confirm the KillSession-reported OS pid + start marker.
-            const killPidConfirmable = (
-                typeof killPid === 'number'
-                && killPid > 0
-                && typeof killProcessStartMarker === 'string'
-                && killProcessStartMarker.length > 0
-            )
-            if (status === 'unknown' && killPidConfirmable) {
+            const status = await confirmSessionArchiveStop(async () => {
+                let status: SessionStopStatus
                 try {
-                    status = await this.rpcGateway.stopRunnerSession(machineId, `PID-${killPid}`, {
-                        processStartMarker: killProcessStartMarker,
-                    })
-                } catch (pidStopError) {
-                    void pidStopError
+                    status = await this.rpcGateway.stopRunnerSession(machineId, sessionId)
+                } catch (stopError) {
+                    // Machine RPC missing is NOT proof the detached CLI is gone
+                    // (KillMode=process children survive runner death). Refuse to
+                    // archive on any StopSession failure — including when KillSession
+                    // was also unreachable. Both targets missing still leaves a
+                    // possible live orphan; retry StopSession when the runner
+                    // reconnects (#1911 bot Major).
+                    void stopError
                     status = 'still_alive'
                 }
-            }
-            // Estate dogfood (#1911 / Peer #1820): KillSession often supplies no
-            // pid+marker when the CLI socket is already gone. If session-id stop
-            // is unknown, ask the runner about metadata.hostPid as a tombstone —
-            // without a start marker the runner returns already_gone only when
-            // the OS pid is dead (alive → unknown; never tree-kills). Refuse
-            // still_alive / unknown on that confirm.
-            if (status === 'unknown' && !killPidConfirmable) {
-                const hostPid = sessionMeta?.hostPid
-                if (typeof hostPid === 'number' && hostPid > 0) {
+                // KillSession acknowledges before cleanupAndExit finishes, and socket
+                // loss is not exit proof. When the runner cannot find the HAPI id,
+                // confirm the KillSession-reported OS pid + start marker.
+                const killPidConfirmable = (
+                    typeof killPid === 'number'
+                    && killPid > 0
+                    && typeof killProcessStartMarker === 'string'
+                    && killProcessStartMarker.length > 0
+                )
+                if (status === 'unknown' && killPidConfirmable) {
                     try {
-                        status = await this.rpcGateway.stopRunnerSession(machineId, `PID-${hostPid}`)
-                    } catch (hostPidStopError) {
-                        void hostPidStopError
+                        status = await this.rpcGateway.stopRunnerSession(machineId, `PID-${killPid}`, {
+                            processStartMarker: killProcessStartMarker,
+                        })
+                    } catch (pidStopError) {
+                        void pidStopError
                         status = 'still_alive'
                     }
                 }
-            }
-            // Ambiguous machine-spawn keep-stub: startedBy=runner, no hostPid, still
-            // tagged machine-spawn:<id>. StopSession returns unknown forever (nothing
-            // tracked). There is no OS child to confirm — allow hub archive so the
-            // ghost is not permanent while the runner is online (#1911 Opus Major).
-            // A late-booting child that later hits reopen must not resurrect: CLI
-            // bootstrapExistingSession refuses archived rows (#1911 cold-read M1).
-            if (status === 'unknown') {
-                const stored = this.store.sessions.getSession(sessionId)
-                if (
-                    stored
-                    && isMachineSpawnPreallocatedStub(stored)
-                    && !(typeof sessionMeta?.hostPid === 'number' && sessionMeta.hostPid > 0)
-                ) {
-                    status = 'already_gone'
+                // Estate dogfood (#1911 / Peer #1820): KillSession often supplies no
+                // pid+marker when the CLI socket is already gone. If session-id stop
+                // is unknown, ask the runner about metadata.hostPid as a tombstone —
+                // without a start marker the runner returns already_gone only when
+                // the OS pid is dead (alive → unknown; never tree-kills). Refuse
+                // still_alive / unknown on that confirm.
+                if (status === 'unknown' && !killPidConfirmable) {
+                    const hostPid = sessionMeta?.hostPid
+                    if (typeof hostPid === 'number' && hostPid > 0) {
+                        try {
+                            status = await this.rpcGateway.stopRunnerSession(machineId, `PID-${hostPid}`)
+                        } catch (hostPidStopError) {
+                            void hostPidStopError
+                            status = 'still_alive'
+                        }
+                    }
                 }
-            }
+                // Ambiguous machine-spawn keep-stub: startedBy=runner, no hostPid, still
+                // tagged machine-spawn:<id>. StopSession returns unknown forever (nothing
+                // tracked). There is no OS child to confirm — allow hub archive so the
+                // ghost is not permanent while the runner is online (#1911 Opus Major).
+                // A late-booting child that later hits reopen must not resurrect: CLI
+                // bootstrapExistingSession refuses archived rows (#1911 cold-read M1).
+                if (status === 'unknown') {
+                    const stored = this.store.sessions.getSession(sessionId)
+                    if (
+                        stored
+                        && isMachineSpawnPreallocatedStub(stored)
+                        && !(typeof sessionMeta?.hostPid === 'number' && sessionMeta.hostPid > 0)
+                    ) {
+                        status = 'already_gone'
+                    }
+                }
+                return status
+            }, { timeoutMs: this.archiveStopConfirmationTimeoutMs })
             if (status === 'still_alive' || status === 'unknown') {
-                throw new Error('Session process is still running and could not be stopped')
+                throw new SessionArchiveStopUnconfirmedError()
             }
         } else if (machineId && !runnerSpawned) {
             // Terminal / non-runner sessions: KillSession is the primary stop.
