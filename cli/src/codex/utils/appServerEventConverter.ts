@@ -1,5 +1,6 @@
 import { INCLUSIVE_INPUT_TOKEN_USAGE_MARKER } from '@hapi/protocol/usage';
 import { logger } from '@/ui/logger';
+import { codexAssistantText } from './assistantText';
 
 type ConvertedEvent = {
     type: string;
@@ -502,6 +503,7 @@ export class AppServerEventConverter {
     private readonly lastCommandOutputDeltaByItemId = new Map<string, string>();
     private readonly rawAgentToolCallIds = new Set<string>();
     private readonly rawAgentToolNames = new Map<string, string>();
+    private readonly announcedCompactionStarts = new Set<string>();
 
     private handleWrappedCodexEvent(paramsRecord: Record<string, unknown>): ConvertedEvent[] | null {
         const msg = asRecord(paramsRecord.msg);
@@ -970,6 +972,15 @@ export class AppServerEventConverter {
             }
 
             if (itemType === 'contextcompaction') {
+                if (method === 'item/started') {
+                    const compactionKey = `${asString(eventScope.thread_id) ?? ''}\0${itemId}`;
+                    if (this.announcedCompactionStarts.has(compactionKey)) {
+                        return events;
+                    }
+                    this.announcedCompactionStarts.add(compactionKey);
+                    events.push(scoped({ type: 'compaction_started', compaction_id: itemId }));
+                    return events;
+                }
                 if (method === 'item/completed') {
                     const threadId = asString(eventScope.thread_id);
                     const turnId = asString(eventScope.turn_id);
@@ -992,9 +1003,13 @@ export class AppServerEventConverter {
                         return events;
                     }
                     const text = extractItemText(item) ?? this.agentMessageBuffers.get(itemId);
-                    if (text || (item.delivery === 'async' && Array.isArray(item.questions) && item.questions.length > 0)) {
-                        events.push(scoped({ type: 'agent_message', message: text ?? '',
+                    const message = codexAssistantText(text ?? '', item.phase);
+                    const hasAsyncQuestions = item.delivery === 'async' && Array.isArray(item.questions) && item.questions.length > 0;
+                    if (message || hasAsyncQuestions) {
+                        events.push(scoped({ type: 'agent_message', message,
                             ...(item.delivery === 'async' ? { delivery: 'async', questions: item.questions } : {}) }));
+                    }
+                    if (text || hasAsyncQuestions) {
                         this.completedAgentMessageItems.add(itemId);
                         this.agentMessageBuffers.delete(itemId);
                     }
@@ -1219,5 +1234,6 @@ export class AppServerEventConverter {
         this.lastCommandOutputDeltaByItemId.clear();
         this.rawAgentToolCallIds.clear();
         this.rawAgentToolNames.clear();
+        this.announcedCompactionStarts.clear();
     }
 }
