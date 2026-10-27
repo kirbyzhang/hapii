@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from 'bun:test'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
 import { SyncEngine } from './syncEngine'
+import { SessionArchiveStopUnconfirmedError } from './sessionArchiveStop'
 import { RpcTargetMissingError } from './rpcGateway'
 import type { SessionCache } from './sessionCache'
 
@@ -63,6 +64,58 @@ describe('SyncEngine.archiveSession runner reaping (#1910)', () => {
     beforeEach(() => {
         store = new Store(':memory:')
         engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        ;(engine as unknown as { archiveStopConfirmationTimeoutMs: number }).archiveStopConfirmationTimeoutMs = 0
+    })
+
+    it('retries the original session ID when shutdown finishes late without a PID marker', async () => {
+        const sessionId = insertActiveSession('late-id-stop', 'machine-x')
+        ;(engine as unknown as { archiveStopConfirmationTimeoutMs: number }).archiveStopConfirmationTimeoutMs = 3000
+        let kills = 0
+        const confirmations: string[] = []
+        const gateway = (engine as unknown as { rpcGateway: import('./rpcGateway').RpcGateway }).rpcGateway
+        gateway.killSession = async () => { kills++; return {} }
+        gateway.stopRunnerSession = async (_machine, id) => {
+            confirmations.push(id)
+            return confirmations.length < 3 ? 'unknown' : 'already_gone'
+        }
+        await engine.archiveSession(sessionId)
+        expect(kills).toBe(1)
+        expect(confirmations).toEqual([sessionId, sessionId, sessionId])
+        expect(cache().getSession(sessionId)?.metadata?.lifecycleState).toBe('archived')
+        expect(engine.isSessionArchiveUnconfirmed(sessionId)).toBe(false)
+    })
+
+    it('reports an explicit unconfirmed-stop error after the retry budget expires', async () => {
+        const sessionId = insertActiveSession('permanent-id-unknown', 'machine-x')
+        setKillSessionOk()
+        ;(engine as unknown as { rpcGateway: { stopRunnerSession: unknown } }).rpcGateway.stopRunnerSession = async () => 'unknown'
+        await expect(engine.archiveSession(sessionId)).rejects.toBeInstanceOf(SessionArchiveStopUnconfirmedError)
+        expect(engine.isSessionArchiveUnconfirmed(sessionId)).toBe(true)
+        expect(cache().getSession(sessionId)?.metadata?.lifecycleState).not.toBe('archived')
+    })
+
+    it('confirms a late inactive shared root without archiving its live sibling', async () => {
+        const metadata = {
+            path: '/tmp/proj', host: 'localhost', machineId: 'machine-x', flavor: 'codex' as const,
+            startedBy: 'runner' as const, capabilities: { concurrentClients: true }
+        }
+        const root = cache().getOrCreateSession('shared-root-late', { ...metadata, codexSessionId: 'native-root' }, null, NAMESPACE)
+        const sibling = cache().getOrCreateSession('shared-root-sibling', { ...metadata, codexSessionId: 'native-sibling' }, null, NAMESPACE)
+        cache().markSessionActive(root.id)
+        cache().markSessionActive(sibling.id)
+        ;(engine as unknown as { archiveStopConfirmationTimeoutMs: number }).archiveStopConfirmationTimeoutMs = 3000
+        const gateway = (engine as unknown as { rpcGateway: import('./rpcGateway').RpcGateway }).rpcGateway
+        const calls: string[] = []
+        gateway.killSession = async id => { engine.handleSessionEnd({ sid: id, time: Date.now() }); return {} }
+        gateway.stopRunnerSession = async (_machine, id) => {
+            calls.push(id)
+            return calls.length === 1 ? 'unknown' : 'already_gone'
+        }
+        await engine.archiveSession(root.id)
+        expect(calls).toEqual([root.id, root.id])
+        expect(cache().getSession(root.id)?.metadata?.lifecycleState).toBe('archived')
+        expect(cache().getSession(sibling.id)?.active).toBe(true)
+        expect(cache().getSession(sibling.id)?.metadata?.lifecycleState).not.toBe('archived')
     })
 
     it('does not archive when the runner confirms still_alive after KillSession miss', async () => {

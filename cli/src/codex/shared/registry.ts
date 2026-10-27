@@ -5,7 +5,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { z } from 'zod';
 import { configuration } from '@/configuration';
-import { getProcessStartMarker, isProcessAlive } from '@/utils/process';
+import { getProcessStartMarker, getProcessStartMarkers, isProcessAlive } from '@/utils/process';
 import { withSettingsFileLock } from '@hapi/protocol/settingsFileLock';
 
 const RuntimeSchema = z.object({
@@ -32,15 +32,24 @@ export function runtimeAlive(record: CodexRuntimeRecord): boolean {
     return isProcessAlive(record.pid) && getProcessStartMarker(record.pid) === record.marker;
 }
 
-function generationMayBeAlive(pid: number, marker?: string): boolean {
+function generationMayBeAlive(pid: number, marker?: string, probe = getProcessStartMarker): boolean {
     if (!isProcessAlive(pid)) return false;
-    const actual = getProcessStartMarker(pid);
+    const actual = probe(pid);
     // A failed OS probe is not evidence that the engine exited.
     return !actual || !marker || actual === marker;
 }
 export function runtimeMayBeAlive(owner: CodexRuntimeRecord): boolean {
     return generationMayBeAlive(owner.pid, owner.marker)
         || Boolean(owner.serverPid && generationMayBeAlive(owner.serverPid, owner.serverMarker));
+}
+
+/** Fresh stop-time snapshot; an unreadable generation still protects its roots. */
+export function filterRuntimesThatMayBeAlive(owners: CodexRuntimeRecord[]): CodexRuntimeRecord[] {
+    const pids = owners.flatMap(owner => owner.serverPid ? [owner.pid, owner.serverPid] : [owner.pid]);
+    const markers = getProcessStartMarkers(pids.filter(isProcessAlive));
+    const probe = (pid: number) => markers.get(pid) ?? null;
+    return owners.filter(owner => generationMayBeAlive(owner.pid, owner.marker, probe)
+        || Boolean(owner.serverPid && generationMayBeAlive(owner.serverPid, owner.serverMarker, probe)));
 }
 
 export async function readRuntimes(options?: { strict?: boolean }): Promise<CodexRuntimeRecord[]> {

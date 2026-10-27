@@ -14,6 +14,8 @@ import { UpdatePlanView } from '@/components/ToolCard/views/UpdatePlanView'
 import { WriteView } from '@/components/ToolCard/views/WriteView'
 import { GoalView } from '@/components/ToolCard/views/GoalView'
 import { canShowGoalPreview, isGoalToolName } from '@/components/ToolCard/goalTools'
+import { MarkdownRenderer } from '@/components/MarkdownRenderer'
+import { useTranslation } from '@/lib/use-translation'
 import { getInputStringAny } from '@/lib/toolInputUtils'
 import {
     getCodexAgentFieldRows,
@@ -38,7 +40,24 @@ const SkillFullView: ToolViewComponent = ({ block }: ToolViewProps) => {
     )
 }
 
+// Only direct child messages belong to this agent. Nested tool children can
+// contain another agent's reply and must remain inside that agent's trace.
+export function getLatestCodexAgentReply(block: ToolCallBlock): { id: string; text: string } | null {
+    if (block.tool.name !== 'CodexAgent') return null
+    for (let index = block.children.length - 1; index >= 0; index -= 1) {
+        const child = block.children[index]
+        if (child.kind === 'agent-text' && child.text.trim()) return child
+        if (child.kind === 'tool-call' && (child.tool.name === 'ExitPlanMode' || child.tool.name === 'exit_plan_mode')) {
+            const plan = getInputStringAny(child.tool.input, ['plan'])
+            if (plan?.trim()) return { id: child.id, text: plan }
+        }
+    }
+    return null
+}
+
 const CodexAgentView: ToolViewComponent = ({ block, surface }: ToolViewProps) => {
+    const { t } = useTranslation()
+    const reply = surface === 'inline' ? getLatestCodexAgentReply(block) : null
     const input = block.tool.input
     const rows = getCodexAgentFieldRows(block.tool.name, input)
     const prompt = getCodexAgentPrompt(input)
@@ -71,6 +90,22 @@ const CodexAgentView: ToolViewComponent = ({ block, surface }: ToolViewProps) =>
             ) : null}
             {resultSummary ? (
                 <div className="text-xs text-[var(--app-hint)]">{resultSummary}</div>
+            ) : null}
+            {reply ? (
+                reply.text.length > 1200 || reply.text.split('\n').length > 16 ? (
+                    <details key={reply.id} open className="rounded-xl border border-[var(--app-border)] p-3">
+                        <summary className="cursor-pointer text-xs font-medium text-[var(--app-hint)]">
+                            {t('tool.result')}
+                        </summary>
+                        <div className="mt-2 max-h-80 overflow-y-auto pr-1">
+                            <MarkdownRenderer content={reply.text} />
+                        </div>
+                    </details>
+                ) : (
+                    <div className="rounded-xl border border-[var(--app-border)] px-3 py-2">
+                        <MarkdownRenderer content={reply.text} />
+                    </div>
+                )
             ) : null}
         </div>
     )

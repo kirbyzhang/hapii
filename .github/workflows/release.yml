@@ -45,6 +45,7 @@ jobs:
                       --generate-notes \
                       cli/release-artifacts/*
             - name: Update Homebrew formula
+              if: github.repository == 'tiann/hapi'
               continue-on-error: true
               env:
                   GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

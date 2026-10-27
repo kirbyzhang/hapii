@@ -545,3 +545,84 @@ describe('reduceChatBlocks', () => {
         expect(assistant?.kind === 'agent-text' ? assistant.roundSummary : undefined).toEqual(summary)
     })
 })
+
+describe('async question answer state', () => {
+    const question: NormalizedMessage = {
+        id: 'question-row', localId: null, createdAt: 1, role: 'agent', isSidechain: false,
+        content: [{ type: 'tool-call', id: 'question-1', name: 'request_user_input',
+            input: { delivery: 'async', questions: [{ id: 'q0', question: 'Choose', options: [] }] },
+            description: null, uuid: 'question-row', parentUUID: null }]
+    }
+    const answer: NormalizedMessage = {
+        ...userMessage('answer-row', 'Choose\nAlpha', 2), invokedAt: null,
+        meta: { asyncQuestionAnswer: { questionId: 'question-1', answers: { q0: { answers: ['Alpha'] } } } }
+    }
+    const state = (messages: NormalizedMessage[]) => {
+        const blocks = reduceChatBlocks([question], null, { asyncQuestionAnswerMessages: messages }).blocks
+        const block = blocks.find((block) => block.kind === 'tool-call')
+        return block?.kind === 'tool-call' ? block.tool : undefined
+    }
+
+    it('derives queued state after reload, without creating a permission', () => {
+        expect(state([answer])?.asyncAnswer).toEqual({ answers: { q0: { answers: ['Alpha'] } }, status: 'queued' })
+        expect(state([answer])?.permission).toBeUndefined()
+    })
+
+    it('requires invokedAt for answered state, even if the row is marked sent', () => {
+        expect(state([{ ...answer, status: 'sent' }])?.asyncAnswer?.status).toBe('queued')
+        expect(state([{ ...answer, invokedAt: 3 }])?.asyncAnswer?.status).toBe('answered')
+    })
+
+    it('preserves delivery uncertainty until invocation is confirmed', () => {
+        expect(state([{ ...answer, deliveryState: 'indeterminate' }])?.asyncAnswer?.status).toBe('indeterminate')
+        expect(state([{ ...answer, deliveryState: 'indeterminate', invokedAt: 3 }])?.asyncAnswer?.status).toBe('answered')
+    })
+
+    it('restores unanswered state when a queued answer is removed or failed', () => {
+        state([answer])
+        expect(state([])?.asyncAnswer).toBeUndefined()
+        expect(state([{ ...answer, status: 'failed' }])?.asyncAnswer).toBeUndefined()
+    })
+
+    it('ignores malformed metadata and answers for different question ids', () => {
+        expect(state([{ ...answer, meta: { asyncQuestionAnswer: { questionId: 'question-1', answers: 'Alpha' } } }])?.asyncAnswer).toBeUndefined()
+        expect(state([{ ...answer, meta: { asyncQuestionAnswer: { questionId: 'other', answers: { q0: { answers: ['Alpha'] } } } } }])?.asyncAnswer).toBeUndefined()
+    })
+
+    it('normalizes persisted metadata and indeterminate delivery for queue state', () => {
+        const row: DecryptedMessage = {
+            id: 'answer', localId: 'codex-async-answer:question-1', seq: 1, createdAt: 2,
+            deliveryState: 'indeterminate', invokedAt: null,
+            content: { role: 'user', content: { type: 'text', text: 'Choose\nAlpha' }, meta: answer.meta }
+        }
+        const normalized = normalizeDecryptedMessage(row)!
+        expect(normalized.meta).toEqual(answer.meta)
+        expect(normalized.deliveryState).toBe('indeterminate')
+        expect(state([normalized])?.asyncAnswer?.status).toBe('indeterminate')
+    })
+})
+
+it('reconciles async answer changes, preserving references only for equal answers', () => {
+    const question: NormalizedMessage = {
+        id: 'question-row', localId: null, createdAt: 1, role: 'agent', isSidechain: false,
+        content: [{ type: 'tool-call', id: 'question-1', name: 'request_user_input',
+            input: { delivery: 'async', questions: [] }, description: null, uuid: 'question-row', parentUUID: null }]
+    }
+    const answer: NormalizedMessage = {
+        ...userMessage('answer-row', 'Alpha', 2), invokedAt: null,
+        meta: { asyncQuestionAnswer: { questionId: 'question-1', answers: { q0: { answers: ['Alpha'] } } } }
+    }
+    const reduce = (messages: NormalizedMessage[]) => reduceChatBlocks([question], null, { asyncQuestionAnswerMessages: messages }).blocks
+    const first = reconcileChatBlocks(reduce([]), new Map())
+    const queued = reconcileChatBlocks(reduce([answer]), first.byId)
+    expect(queued.blocks[0]).not.toBe(first.blocks[0])
+    const repeated = reconcileChatBlocks(reduce([answer]), queued.byId)
+    expect(repeated.blocks[0]).toBe(queued.blocks[0])
+    const answered = reconcileChatBlocks(reduce([{ ...answer, invokedAt: 3 }]), repeated.byId)
+    expect(answered.blocks[0]).not.toBe(repeated.blocks[0])
+    const changedAnswer = { ...answer, meta: { asyncQuestionAnswer: { questionId: 'question-1', answers: { q0: { answers: ['Beta'] } } } } }
+    const changed = reconcileChatBlocks(reduce([changedAnswer]), queued.byId)
+    expect(changed.blocks[0]).not.toBe(queued.blocks[0])
+    const canceled = reconcileChatBlocks(reduce([]), queued.byId)
+    expect(canceled.blocks[0]).not.toBe(queued.blocks[0])
+})

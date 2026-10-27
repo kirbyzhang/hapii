@@ -30,6 +30,7 @@ import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
 import { Hono, type Context } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
+import { SessionArchiveStopUnconfirmedError } from '../../sync/sessionArchiveStop'
 import type { WebAppEnv } from '../middleware/auth'
 import { loadScratchlistAttachmentLimitsFromEnv } from '../../config/scratchlistAttachmentLimits'
 import { validateScratchlistAttachmentsForWrite, scratchlistSessionBytesBeforeForPut } from '../../scratchlistAttachments/validate'
@@ -451,18 +452,26 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         const lifecycleState = sessionResult.session.metadata?.lifecycleState
-        if (!sessionResult.session.active && lifecycleState === 'archived') {
+        const stopUnconfirmed = engine.isSessionArchiveUnconfirmed(sessionResult.sessionId)
+        if (!sessionResult.session.active && lifecycleState === 'archived' && !stopUnconfirmed) {
             return c.json({ ok: true, alreadyArchived: true })
         }
 
         // tiann/hapi#1820: `idle` is a live lifecycle too — a session the hub
         // reconciled as keepalive-only must stay archivable once its socket
         // finally drops, exactly like a stale `running` row.
-        if (!sessionResult.session.active && !isLiveLifecycleState(lifecycleState)) {
+        if (!sessionResult.session.active && !isLiveLifecycleState(lifecycleState) && !stopUnconfirmed) {
             return c.json({ error: 'Session is inactive' }, 409)
         }
 
-        await engine.archiveSession(sessionResult.sessionId)
+        try {
+            await engine.archiveSession(sessionResult.sessionId)
+        } catch (error) {
+            if (error instanceof SessionArchiveStopUnconfirmedError) {
+                return c.json({ error: error.message }, 409)
+            }
+            throw error
+        }
         return c.json({ ok: true })
     })
 
@@ -599,6 +608,9 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
         if (!isPermissionModeAllowedForFlavor(mode, flavor)) {
             return c.json({ error: 'Invalid permission mode for session flavor' }, 400)
+        }
+        if (mode === 'safe-yolo' && sessionResult.session.metadata?.capabilities?.concurrentClients) {
+            return c.json({ error: 'Safe Yolo is not available for shared sessions' }, 400)
         }
         if (flavor === 'opencode' && mode === 'plan' && sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
             return c.json({ error: 'OpenCode plan mode is only supported for remote sessions' }, 409)
@@ -1470,6 +1482,24 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list Grok models'
+            }, 500)
+        }
+    })
+
+    app.get('/sessions/:id/dsh-models', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) return sessionResult
+        if (sessionResult.session.metadata?.flavor !== 'dsh') {
+            return c.json({ success: false, error: 'DSH models are only available for DeepSeek Harness sessions' }, 400)
+        }
+        try {
+            return c.json(await engine.listDshModelsForSession(sessionResult.sessionId))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list DSH models'
             }, 500)
         }
     })

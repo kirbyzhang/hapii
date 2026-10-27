@@ -220,6 +220,8 @@ function areToolCallsEqual(left: ToolCallBlock, right: ToolCallBlock, childrenSa
         && left.tool.completedAt === right.tool.completedAt
         && left.tool.execStartedAt === right.tool.execStartedAt
         && left.tool.execCompletedAt === right.tool.execCompletedAt
+        && left.tool.asyncAnswer?.status === right.tool.asyncAnswer?.status
+        && areAnswersEqual(left.tool.asyncAnswer?.answers, right.tool.asyncAnswer?.answers)
         && arePermissionsEqual(left.tool.permission, right.tool.permission)
         && areRoundSummariesEqual(left.roundSummary, right.roundSummary)
 }

@@ -63,3 +63,14 @@ describe('RequestUserInputView', () => {
         expect(screen.queryByText('Note:')).not.toBeInTheDocument()
     })
 })
+
+it('shows persisted async answer selections without a native permission', () => {
+    const value = block(true)
+    value.tool.input = { delivery: 'async', questions: [{ id: 'choice', question: 'Choose', isOther: true, options: [{ label: 'Alpha' }] }] }
+    value.tool.result = null
+    value.tool.asyncAnswer = { status: 'queued', answers: { choice: { answers: ['Alpha', 'user_note: Saved answer'] } } }
+    render(<RequestUserInputView block={value} metadata={null} />)
+    expect(screen.getByText('Alpha').closest('.rounded-md')).toHaveClass('border-emerald-500')
+    expect(screen.getByText('Saved answer')).toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+})

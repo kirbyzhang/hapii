@@ -1,3 +1,4 @@
+import { asyncQuestionAnswerLocalId } from '@hapi/protocol/asyncUserInput'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { ChatToolCall } from '@/chat/types'
@@ -6,6 +7,9 @@ import { Button } from '@/components/ui/button'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import {
     isRequestUserInputToolName,
+    isAsyncRequestUserInput,
+    isChildAsyncRequestUserInput,
+    formatAsyncQuestionAnswerMessage,
     parseRequestUserInputInput,
     formatRequestUserInputAnswers,
     isRequestUserInputQuestionAnswered,
@@ -80,10 +84,12 @@ export function RequestUserInputFooter(props: {
     const permission = props.tool.permission
     const parsed = useMemo(() => parseRequestUserInputInput(props.tool.input), [props.tool.input])
     const questions = parsed.questions
+    const isAsync = isAsyncRequestUserInput(props.tool.input)
 
     const [step, setStep] = useState(0)
     const [stateByQuestion, setStateByQuestion] = useState<Record<string, QuestionState>>({})
 
+    const [submitted, setSubmitted] = useState(false)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const noteRef = useRef<HTMLTextAreaElement>(null)
@@ -96,11 +102,34 @@ export function RequestUserInputFooter(props: {
         }
         setStateByQuestion(initial)
         setLoading(false)
+        setSubmitted(false)
         setError(null)
     }, [props.tool.id])
 
-    if (!permission || permission.status !== 'pending') return null
+    // SSE/persisted rows own the durable state. A short receipt only bridges
+    // POST completion and the first row, and must not outlive queue cancellation.
+    useEffect(() => {
+        if (props.tool.asyncAnswer) setSubmitted(false)
+    }, [props.tool.asyncAnswer, submitted])
+    useEffect(() => {
+        if (!submitted) return
+        const timeout = setTimeout(() => setSubmitted(false), 10000)
+        return () => clearTimeout(timeout)
+    }, [submitted])
+
     if (!isRequestUserInputToolName(props.tool.name)) return null
+    if (isAsync && isChildAsyncRequestUserInput(props.tool.input)) {
+        return <div className="mt-3 text-xs text-[var(--app-hint)]">{t('tool.requestUserInput.childQuestion')}</div>
+    }
+    if (isAsync && (props.tool.asyncAnswer || submitted)) {
+        const status = props.tool.asyncAnswer?.status ?? 'queued'
+        const label = status === 'answered' ? 'tool.requestUserInput.answerSent'
+            : status === 'indeterminate' ? 'tool.requestUserInput.answerIndeterminate'
+            : 'tool.requestUserInput.answerQueued'
+        return <div role="status" className="mt-3 text-xs text-[var(--app-hint)]">{t(label)}</div>
+    }
+    if (!isAsync && (!permission || permission.status !== 'pending')) return null
+    if (questions.length === 0) return null
 
     const run = async (action: () => Promise<void>, hapticType: 'success' | 'error') => {
         if (props.disabled) return
@@ -124,7 +153,7 @@ export function RequestUserInputFooter(props: {
     }
 
     const submit = async () => {
-        if (loading) return
+        if (props.disabled || loading) return
 
         // Validate all questions
         for (let i = 0; i < questions.length; i += 1) {
@@ -152,7 +181,28 @@ export function RequestUserInputFooter(props: {
         }
 
         setLoading(true)
-        await run(() => props.api.approvePermission(props.sessionId, permission.id, formattedAnswers), 'success')
+        await run(async () => {
+            if (isAsync) {
+                await props.api.sendMessage(
+                    props.sessionId,
+                    formatAsyncQuestionAnswerMessage(questions, formattedAnswers.answers),
+                    asyncQuestionAnswerLocalId(props.tool.id),
+                    undefined, undefined, undefined,
+                    { questionId: props.tool.id, answers: formattedAnswers.answers }
+                )
+                setSubmitted(true)
+                // The answer is already durable. Try once to deliver it into
+                // the running turn; an idle/failed/uncertain steer keeps the
+                // ordinary queue row and must never become a failed POST.
+                try {
+                    await props.api.steerMessage(props.sessionId, asyncQuestionAnswerLocalId(props.tool.id))
+                } catch {
+                    // Persisted rows and messages-consumed SSE own delivery state.
+                }
+            } else if (permission) {
+                await props.api.approvePermission(props.sessionId, permission.id, formattedAnswers)
+            }
+        }, 'success')
         setLoading(false)
     }
 

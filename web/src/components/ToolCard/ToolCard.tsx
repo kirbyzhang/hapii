@@ -12,9 +12,9 @@ import { CodexPlanFooter } from '@/components/ToolCard/CodexPlanFooter'
 import { AskUserQuestionFooter } from '@/components/ToolCard/AskUserQuestionFooter'
 import { RequestUserInputFooter } from '@/components/ToolCard/RequestUserInputFooter'
 import { isAskUserQuestionToolName } from '@/components/ToolCard/askUserQuestion'
-import { isRequestUserInputToolName } from '@/components/ToolCard/requestUserInput'
+import { isAsyncRequestUserInput, isRequestUserInputToolName } from '@/components/ToolCard/requestUserInput'
 import { getToolPresentation } from '@/components/ToolCard/knownTools'
-import { getToolFullViewComponent, getToolViewComponent } from '@/components/ToolCard/views/_all'
+import { getLatestCodexAgentReply, getToolFullViewComponent, getToolViewComponent } from '@/components/ToolCard/views/_all'
 import { getToolResultViewComponent } from '@/components/ToolCard/views/_results'
 import { formatTaskChildLabel, TaskStateIcon } from '@/components/ToolCard/helpers'
 import { toolDurationMs } from '@/components/ToolCard/toolDuration'
@@ -379,8 +379,8 @@ export function ToolDetailDialogContent(props: {
     const isRequestUserInput = isRequestUserInputToolName(toolName)
     const isQuestionTool = isAskUserQuestion || isRequestUserInput
     const isQuestionToolWithAnswers = isQuestionTool
-        && permission?.answers
-        && Object.keys(permission.answers).length > 0
+        && (permission?.answers || props.block.tool.asyncAnswer?.answers)
+        && Object.keys(permission?.answers ?? props.block.tool.asyncAnswer?.answers ?? {}).length > 0
     return (
         <div className="mt-3 flex max-h-[75vh] flex-col gap-4 overflow-auto">
             <ToolTimingDetails block={props.block} />
@@ -435,9 +435,10 @@ function ToolCardInner(props: ToolCardProps) {
         : null
     const isCodexAgentCard = toolName === 'CodexAgent'
     const useCompactTerminalCard = shouldUseCompactTerminalToolCard(toolName, props.terminalToolDisplayMode)
-    const showInline = shouldShowInlineToolCardBody(toolName, presentation.minimal, props.terminalToolDisplayMode)
+    const showInline = (isCodexAgentCard && getLatestCodexAgentReply(props.block) !== null)
+        || shouldShowInlineToolCardBody(toolName, presentation.minimal, props.terminalToolDisplayMode)
     const CompactToolView = showInline ? getToolViewComponent(toolName, props.block.tool) : null
-    const compactViewOwnsInteractions = toolName === 'CodexDiff'
+    const compactViewOwnsInteractions = toolName === 'CodexDiff' || isCodexAgentCard
     const ResultToolView = getToolResultViewComponent(toolName)
     const permission = props.block.tool.permission
     const isAskUserQuestion = isAskUserQuestionToolName(toolName)
@@ -447,7 +448,8 @@ function ToolCardInner(props: ToolCardProps) {
         permission.status === 'resolved' || permission.status === 'pending'
         || ((permission.status === 'denied' || permission.status === 'canceled') && Boolean(permission.reason))
     ))
-    const hasBody = showInline || taskSummary !== null || showsPermissionFooter
+    const isAsyncQuestion = isRequestUserInput && isAsyncRequestUserInput(props.block.tool.input)
+    const hasBody = showInline || taskSummary !== null || showsPermissionFooter || isAsyncQuestion
     // Header/content padding already supplies 12-16px below timing; add only
     // the remainder needed to match the detail dialog's 16px section gap.
     const inlineBodySpacing = props.block.tool.state === 'pending'
@@ -620,7 +622,7 @@ function ToolCardInner(props: ToolCardProps) {
                             disabled={props.disabled}
                             onDone={props.onDone}
                         />
-                    ) : isRequestUserInput && permission?.status === 'pending' ? (
+                    ) : isRequestUserInput && (permission?.status === 'pending' || isAsyncQuestion) ? (
                         <RequestUserInputFooter
                             api={props.api}
                             sessionId={props.sessionId}

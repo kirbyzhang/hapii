@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { AsyncQuestionAnswerSchema } from './asyncUserInput'
 import {
     AttachmentMetadataSchema,
     CodexCollaborationModeSchema,
@@ -544,7 +545,8 @@ export const SendMessageRequestSchema = z.object({
     localId: z.string().min(1).optional(),
     attachments: z.array(AttachmentMetadataSchema).optional(),
     scheduledAt: z.number().int().positive().nullable().optional(),
-    deliveryMode: MessageDeliveryModeSchema.optional()
+    deliveryMode: MessageDeliveryModeSchema.optional(),
+    asyncQuestionAnswer: AsyncQuestionAnswerSchema.optional()
 }).refine(
     (data) => data.scheduledAt == null || typeof data.localId === 'string',
     { message: 'scheduledAt requires localId', path: ['localId'] }
@@ -821,6 +823,24 @@ export type GrokModelSummary = {
     name?: string
     reasoningEfforts?: GrokReasoningEffortOption[]
 }
+
+export type DshModelSummary = {
+    modelId: string
+    name?: string
+}
+
+/**
+ * DeepSeek Harness model discovery. Model ids are opaque ACP config-option
+ * values — for dsh 0.2.x they are JSON-encoded `["provider","model"]` tuples —
+ * and must be sent back verbatim when switching.
+ */
+export type DshModelsResponse = {
+    success: boolean
+    availableModels?: DshModelSummary[]
+    currentModelId?: string | null
+    error?: string
+}
+export type ListDshModelsResponse = DshModelsResponse
 
 export type GrokReasoningEffortOption = {
     value: string

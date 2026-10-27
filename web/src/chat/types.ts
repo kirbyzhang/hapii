@@ -1,3 +1,4 @@
+import type { AsyncQuestionAnswer } from '@hapi/protocol/asyncUserInput'
 import type { AttachmentMetadata, MessageStatus } from '@/types/api'
 import type { ThreadGoal } from '@/types/api'
 import type { InlineMediaSource } from '@/chat/inlineMediaSource'
@@ -23,6 +24,7 @@ export type RoundModelUsage = {
 
 export type RoundSummary = {
     provider?: 'codex'
+    turnId?: string
     usage?: UsageData
     modelUsage: Record<string, RoundModelUsage>
     totalCostUsd?: number
@@ -39,9 +41,9 @@ export type AgentEvent =
     | { type: 'limit-warning'; /** 0–1 ratio (e.g. 0.9 = 90%), integer-precision via CLI pipe format */ utilization: number; endsAt: number; limitType: string }
     | { type: 'ready' }
     | { type: 'api-error'; retryAttempt: number; maxRetries: number; error: unknown }
-    | { type: 'turn-duration'; durationMs: number; targetMessageId?: string }
+    | { type: 'turn-duration'; durationMs: number; targetMessageId?: string; provider?: 'codex'; turnId?: string }
     | { type: 'turn-summary'; summary: RoundSummary }
-    | { type: 'token-count'; info: unknown; provider?: 'codex'; model?: string | null }
+    | { type: 'token-count'; info: unknown; provider?: 'codex'; turnId?: string; model?: string | null }
     | { type: 'microcompact'; trigger: string; preTokens: number; tokensSaved: number }
     | { type: 'compact'; trigger: string; preTokens: number }
     // Structured result of Pi's compact RPC; rendered as a dedicated chat block.
@@ -161,6 +163,7 @@ export type NormalizedMessage = ({
     meta?: unknown
     usage?: UsageData
     status?: MessageStatus
+    deliveryState?: 'indeterminate'
     originalText?: string
     invokedAt?: number | null
     model?: string | null
@@ -214,6 +217,10 @@ export type ChatToolCall = {
     nativeKind?: string | null
     result?: unknown
     permission?: ToolPermission
+    asyncAnswer?: {
+        answers: AsyncQuestionAnswer['answers']
+        status: 'queued' | 'answered' | 'indeterminate'
+    }
 }
 
 export type UserTextBlock = {
