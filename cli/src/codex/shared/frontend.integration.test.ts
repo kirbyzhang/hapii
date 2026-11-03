@@ -56,6 +56,8 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
         const home = await mkdtemp('/tmp/hapi-shared-e2e-');
         const cwd = join(home, 'work'); const ch = join(home, 'codex'); const hh = join(home, 'hapi');
         await Promise.all([cwd, ch, hh].map(path => mkdir(path)));
+        const secondaryPrompt = 'FROM_SECONDARY_TERMINAL';
+        const secondaryReply = 'SECONDARY_REPLY_CONFIRMED';
         const requests: Record<string, unknown>[] = [];
         const model = createServer((request, response) => {
             const chunks: Buffer[] = []; request.on('data', data => chunks.push(Buffer.from(data)));
@@ -77,7 +79,8 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
                 }) } : environment ? { type: 'function_call', call_id: `env_${id}`, name: 'exec_command', arguments: JSON.stringify({ cmd: 'printf "ROOT=%s\\n" "$HAPI_SESSION_ID"' }) }
                     : { type: 'message', role: 'assistant', id: `msg_${id}`, content: [{ type: 'output_text', text: proposal
                         ? '<proposed_plan>\n# Shared test plan\n\n1. Inspect the source\n2. Implement and verify\n</proposed_plan>'
-                        : `MOCK_DONE ${prompt} ${JSON.stringify(outputs)}` }] };
+                        : prompt.includes(secondaryPrompt) ? `MOCK_DONE ${secondaryPrompt} ${secondaryReply}`
+                            : `MOCK_DONE ${prompt} ${JSON.stringify(outputs)}` }] };
                 const events = [{ type: 'response.created', response: { id } }, { type: 'response.output_item.done', item },
                     { type: 'response.completed', response: { id, usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } } }];
                 response.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -92,6 +95,8 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
             HAPI_API_URL: process.env.HAPI_API_URL, CLI_API_TOKEN: process.env.CLI_API_TOKEN,
             HAPI_INVOKED_CWD: cwd, HAPI_TEST_MARKER: process.env.HAPI_HOME, TERM: 'xterm-256color', LANG: 'en_US.UTF-8', DEBUG: '1' };
         const terminals: ChildProcessWithoutNullStreams[] = [];
+        const terminalOutputs = new Map<ChildProcessWithoutNullStreams, string>();
+        const terminalOutput = (child: ChildProcessWithoutNullStreams) => terminalOutputs.get(child) ?? '';
         const runtimePids = new Set<number>();
         const uploadDirectories = new Set<string>();
         let runner: ChildProcessWithoutNullStreams | undefined;
@@ -103,7 +108,12 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
         let webEvents = '';
         const openTerminal = (args: string[]) => {
             const child = spawn('python3', [py, process.env.HAPI_BUN_EXEC!, '--cwd', resolve('.'), resolve('src/index.ts'), ...args], { cwd, env });
-            child.stdout.on('data', data => { output += data.toString(); }); child.stderr.on('data', data => { output += data.toString(); });
+            terminalOutputs.set(child, '');
+            const capture = (data: Buffer) => {
+                const text = data.toString(); output += text;
+                terminalOutputs.set(child, terminalOutput(child) + text);
+            };
+            child.stdout.on('data', capture); child.stderr.on('data', capture);
             terminals.push(child); return child;
         };
         const base = process.env.HAPI_API_URL!;
@@ -156,15 +166,28 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
             await eventually(detail, value => !record(value.session).thinking, 'native turn idle');
             // Formal plans are native items, while the confirmation menu lives only in the TUI.
             const nativeThreadId = String(record(record(runtime.sessions)[sessionId]).threadId);
+            const historicalMessages = async () => {
+                const messages: unknown[] = [];
+                let query = '';
+                for (let page = 0; page < 20; page++) {
+                    const response = await api(`/sessions/${sessionId}/messages${query}`);
+                    messages.unshift(...(Array.isArray(response.messages) ? response.messages : []));
+                    const cursor = record(response.page);
+                    if (!cursor.hasMore) return messages;
+                    if (typeof cursor.nextBeforeAt !== 'number' || typeof cursor.nextBeforeSeq !== 'number') {
+                        throw new Error('Historical message page has no backward cursor');
+                    }
+                    query = `?beforeAt=${cursor.nextBeforeAt}&beforeSeq=${cursor.nextBeforeSeq}`;
+                }
+                throw new Error('Historical messages exceeded the test pagination limit');
+            };
             const planCards = async () => {
-                const response = await api(`/sessions/${sessionId}/messages`);
-                return (Array.isArray(response.messages) ? response.messages : [])
+                return (await historicalMessages())
                     .map(message => record(record(record(record(message).content).content).data))
                     .filter(message => message.name === 'ExitPlanMode');
             };
             const implementationMessages = async () => {
-                const response = await api(`/sessions/${sessionId}/messages`);
-                return (Array.isArray(response.messages) ? response.messages : []).map(message => record(record(message).content))
+                return (await historicalMessages()).map(message => record(record(message).content))
                     .filter(content => content.role === 'user' && record(content.content).text === 'Implement the plan.');
             };
             const setPlanMode = async () => {
@@ -233,12 +256,26 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
             await eventually(async () => requests, value => JSON.stringify(value).includes(`ROOT=${sessionId}`), 'per-root shell identity');
             await eventually(async () => webEvents, value => value.includes('CodexBash') && value.includes('tool-call-result') && value.includes(`ROOT=${sessionId}`), 'tool call and result over Web SSE');
             await eventually(() => api(`/sessions/${sessionId}/messages`), value => JSON.stringify(value).includes('CodexBash'), 'tool call persisted for Web reload');
-            const secondOutput = output.length;
+            // A resumed TUI only needs to draw recent history in its viewport.
+            // Use a fresh turn, and never accept another terminal's output.
+            const historyMarker = 'SECONDARY_HISTORY_READY';
+            await send(historyMarker);
+            await eventually(() => api(`/sessions/${sessionId}/messages`), value => hasReply(value, historyMarker), 'recent history before secondary attach');
+            await eventually(detail, value => !record(value.session).thinking, 'idle before secondary attach');
             const second = openTerminal(['resume', sessionId]);
-            await eventually(async () => output.slice(secondOutput), text => text.includes('HELLO_SHARED'), 'secondary attach to terminal-owned engine');
+            await eventually(async () => terminalOutput(second), text => text.includes(historyMarker), 'secondary attach to terminal-owned engine');
+            const firstReplyStart = terminalOutput(first).length;
+            const secondReplyStart = terminalOutput(second).length;
+            second.stdin.write(secondaryPrompt); await new Promise(resolve => setTimeout(resolve, 150)); second.stdin.write('\r');
+            await eventually(() => api(`/sessions/${sessionId}/messages`), value => hasReply(value, secondaryPrompt), 'secondary input answered in the same session');
+            for (const [child, start] of [[first, firstReplyStart], [second, secondReplyStart]] as const) {
+                await eventually(async () => terminalOutput(child).slice(start), text => text.includes(secondaryReply), 'shared reply visible in each terminal');
+            }
             second.stdin.write('/exit'); await new Promise(resolve => setTimeout(resolve, 150)); second.stdin.write('\r');
             await eventually(async () => second.exitCode, value => value !== null, 'secondary detach');
             expect(record((await detail()).session).active).toBe(true); expect(isProcessAlive(Number(runtime.serverPid))).toBe(true);
+            await send('AFTER_SECONDARY_DETACH');
+            await eventually(() => api(`/sessions/${sessionId}/messages`), value => hasReply(value, 'AFTER_SECONDARY_DETACH'), 'primary execution replies after secondary detach');
             const machineId = String(record(record((await detail()).session).metadata).machineId);
             const webCreated = await api(`/machines/${machineId}/spawn`, { directory: cwd, agent: 'codex' });
             expect(webCreated.type).toBe('success'); const webId = String(webCreated.sessionId);
@@ -247,9 +284,8 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
             runtimePids.add(Number(record(record(independent.session).metadata).hostPid));
             await api(`/sessions/${webId}/messages`, { text: 'HELLO_WEB_CREATED', localId: randomUUID() });
             await eventually(() => api(`/sessions/${webId}/messages`), value => hasReply(value, 'HELLO_WEB_CREATED'), 'new Web execution reply');
-            const newAttachOutput = output.length;
             const newAttached = openTerminal(['resume', webId]);
-            await eventually(async () => output.slice(newAttachOutput), text => text.includes('HELLO_WEB_CREATED'), 'attach to Web-created session');
+            await eventually(async () => terminalOutput(newAttached), text => text.includes('HELLO_WEB_CREATED'), 'attach to Web-created session');
             newAttached.stdin.write('/exit'); await new Promise(resolve => setTimeout(resolve, 150)); newAttached.stdin.write('\r');
             await eventually(async () => newAttached.exitCode, value => value !== null, 'detach from Web-created session');
             expect(record((await webDetail()).session).active).toBe(true);
@@ -288,9 +324,8 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
             expect(replayedPlans.filter(card => card.callId === nativePlanId)).toHaveLength(1);
             expect(replayedPlans.filter(card => card.callId === webPlanId)).toHaveLength(1);
             expect(record(record((await detail()).session).agentState).codexPlanProposalId).toBeNull();
-            const attachOutput = output.length;
             const attached = openTerminal(['resume', sessionId]);
-            await eventually(async () => output.slice(attachOutput), text => text.includes('AFTER_WEB_RESUME'), 'attach to Runner-created execution');
+            await eventually(async () => terminalOutput(attached), text => text.includes('AFTER_WEB_RESUME'), 'attach to Runner-created execution');
             attached.stdin.write('/exit'); await new Promise(resolve => setTimeout(resolve, 150)); attached.stdin.write('\r');
             await eventually(async () => attached.exitCode, value => value !== null, 'Runner execution terminal detach');
             expect(isProcessAlive(Number(runnerRuntime.serverPid))).toBe(true); expect(record((await detail()).session).active).toBe(true);
@@ -348,7 +383,7 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
             await client.disconnect();
             const pendingHistory = await api(`/sessions/${sessionId}/messages`);
             expect((pendingHistory.messages as unknown[]).map(record).find(message => message.localId === suspendedInput)?.invokedAt).toBeNull();
-            output = ''; openTerminal(['resume', sessionId]);
+            const recoveredTerminal = openTerminal(['resume', sessionId]);
             const recovered = await eventually(async () => {
                 for (const name of await readdir(join(hh, 'codex-runtimes'))) {
                     if (!name.endsWith('.json')) continue;
@@ -359,7 +394,7 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
                 return {};
             }, value => Boolean(value.endpoint), 'cold recovery binding');
             expect(record(record(recovered.sessions)[sessionId]).threadId).toBe(record(record(runtime.sessions)[sessionId]).threadId);
-            await eventually(async () => output, text => text.includes('AFTER_ATTACH_EXIT'), 'cold native history');
+            await eventually(async () => terminalOutput(recoveredTerminal), text => text.includes('mock-model'), 'cold native TUI ready');
             await eventually(() => api(`/sessions/${sessionId}/messages`), value => (value.messages as unknown[]).map(record).some(message => message.localId === suspendedInput && typeof message.invokedAt === 'number'), 'confirmed-unexecuted pending input delivered after resume');
             await eventually(() => api(`/sessions/${sessionId}/messages`), value => hasReply(value, 'PRESERVE_PENDING_ON_EXIT'), 'pending input completes exactly once');
             await eventually(() => api(`/sessions/${sessionId}/messages`), value => hasReply(value, 'PRESERVE_NATIVE_QUEUE_ON_EXIT'), 'terminal-origin queued input resumes');
@@ -368,6 +403,9 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
             // also calls the model for background title generation).
             const history = record(await client.request('thread/turns/list', { threadId: nativeThread, itemsView: 'full', sortDirection: 'asc', limit: 100 }));
             const userItems = (history.data as unknown[]).map(record).flatMap(turn => (turn.items as unknown[]).map(record)).filter(item => item.type === 'userMessage');
+            // Historical turns must survive cold resume even when they are
+            // older than the resumed terminal's visible viewport.
+            expect(userItems.some(item => JSON.stringify(item).includes('AFTER_ATTACH_EXIT'))).toBe(true);
             for (const id of [suspendedInput, interruptedInput, nativeQueuedInput]) expect(userItems.filter(item => item.clientId === id)).toHaveLength(1);
             expect(JSON.stringify(userItems.find(item => item.clientId === suspendedInput))).toContain(uploadPath);
             const recoveryDetail = record((await detail()).session);
@@ -388,7 +426,8 @@ describe.skipIf(process.env.HAPI_RUN_SHARED_CODEX_TESTS !== '1' || process.platf
             await api(`/sessions/${webId}/archive`, {});
             await eventually(webDetail, value => record(value.session).active === false, 'end reopened Web session');
         } catch (error) {
-            await writeFile('/tmp/hapi-shared-e2e-terminal.log', output + '\nRUNNER:\n' + runnerOutput);
+            const terminalLogs = terminals.map((child, index) => `TERMINAL ${index + 1} (exit ${child.exitCode}, signal ${child.signalCode}):\n${terminalOutput(child)}`);
+            await writeFile('/tmp/hapi-shared-e2e-terminal.log', terminalLogs.join('\n\n') + '\nRUNNER:\n' + runnerOutput);
             throw error;
         } finally {
             eventsAbort.abort(); await eventStream;

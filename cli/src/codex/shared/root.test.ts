@@ -65,7 +65,7 @@ afterEach(async () => {
     finally { vi.useRealTimers(); }
 });
 
-async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; create?: RootHost['create'] }) {
+async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; create?: RootHost['create']; nativeSettings?: Record<string, unknown> }) {
     const directory = await mkdtemp('/tmp/hapi-shared-root-');
     let state: AgentState = { steeringActive: true };
     let metadata: Metadata = { path: directory, host: 'test', flavor: 'codex' };
@@ -102,9 +102,11 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end']; cr
     } satisfies RootHost);
     cleanups.push(async () => { await root.close(false); await rm(directory, { recursive: true, force: true }); });
     await root.prepare();
-    await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false);
+    if (opts?.nativeSettings) (root.client as unknown as { settings: Record<string, unknown> }).settings = structuredClone(opts.nativeSettings);
+    await root.bind('thread', { model: 'mock', ...opts?.nativeSettings, thread: { turns: [] } }, false);
     const native = root.client as unknown as {
         initialized: boolean;
+        settings: Record<string, unknown>;
         thread: { id: string; turns: NativeTurn[] };
         queue: Array<{ id: string; clientUserMessageId: string; input: unknown }>;
         notify(method: string, params: unknown): void;
@@ -428,6 +430,59 @@ async function completePlan(f: Awaited<ReturnType<typeof fixture>>, status = 'co
     await vi.waitFor(() => expect(f.send).toHaveBeenCalledWith(expect.objectContaining({ name: 'ExitPlanMode' }), expect.any(String)));
     return codexPlanProposalId('thread', turn.id, 'plan-item');
 }
+
+describe('initial collaboration mode restoration', () => {
+    it.each(['plan', 'default'] as const)('starts an already-%s native binding without waiting for a no-op notification', async mode => {
+        const settings = { model: 'mock', sandbox: { type: 'readOnly' }, collaborationMode: { mode, settings: {
+            model: 'mock', reasoning_effort: 'high', developer_instructions: 'Keep the native custom instructions'
+        } } };
+        const f = await fixture({ nativeSettings: settings });
+        const original = f.root.client.request.bind(f.root.client);
+        const request = vi.spyOn(f.root.client, 'request');
+        request.mockImplementation(async (method, params) => method === 'thread/settings/update' ? {} : original(method, params));
+        await f.root.activate({ collaborationMode: mode });
+        expect(f.sessionReady).toHaveBeenCalledOnce();
+        expect(request.mock.calls.some(([method]) => method === 'thread/settings/update')).toBe(false);
+        expect(f.native.settings).toEqual(settings);
+    });
+
+    it('waits for a matching native notification when the mode actually changes', async () => {
+        const f = await fixture();
+        const original = f.root.client.request.bind(f.root.client);
+        const request = vi.spyOn(f.root.client, 'request').mockImplementation(async (method, params) =>
+            method === 'thread/settings/update' ? {} : original(method, params));
+        const starting = f.root.activate({ collaborationMode: 'plan' });
+        await vi.waitFor(() => expect(request.mock.calls.some(([method]) => method === 'thread/settings/update')).toBe(true));
+        f.native.notify('thread/settings/updated', { threadId: 'thread', threadSettings: { model: 'mock', collaborationMode: { mode: 'default' } } });
+        await Promise.resolve();
+        expect(f.sessionReady).not.toHaveBeenCalled();
+        const params = request.mock.calls.find(([method]) => method === 'thread/settings/update')![1] as Record<string, unknown>;
+        f.native.notify('thread/settings/updated', { threadId: 'thread', threadSettings: { model: 'mock', ...params } });
+        await starting;
+        expect(f.sessionReady).toHaveBeenCalledOnce();
+        expect(f.state().codexPlanProposalId).toBeNull();
+    });
+
+    it.each([undefined, null])('does not infer a native default mode from a missing mode (%s)', async collaborationMode => {
+        const f = await fixture({ nativeSettings: { model: 'mock', collaborationMode } });
+        const request = vi.spyOn(f.root.client, 'request');
+        await f.root.activate({ collaborationMode: 'default' });
+        expect(request).toHaveBeenCalledWith('thread/settings/update', expect.objectContaining({
+            collaborationMode: expect.objectContaining({ mode: 'default' })
+        }));
+        expect(f.sessionReady).toHaveBeenCalledOnce();
+    });
+
+    it.each(['closed', 'stopping', 'reconnecting', 'disconnected'])('does not accept cached settings while %s', async status => {
+        const f = await fixture();
+        if (status === 'closed') await f.root.close(false);
+        if (status === 'stopping') f.root.stopAccepting();
+        if (status === 'reconnecting') (f.root as unknown as { reconnecting: boolean }).reconnecting = true;
+        if (status === 'disconnected') f.native.initialized = false;
+        await expect(f.root.initialSettings({ collaborationMode: 'default' })).rejects.toThrow('settings are unavailable');
+        expect(f.sessionReady).not.toHaveBeenCalled();
+    });
+});
 
 describe('shared permission modes', () => {
     it('switches native auto-review on and back to the human reviewer', async () => {

@@ -499,7 +499,16 @@ export class SharedCodexRoot {
         } finally { clearTimeout(timer); this.settingsListeners.delete(changed); }
     }
     async initialSettings(options: SharedLaunchOptions): Promise<void> {
-        if (options.collaborationMode) await this.applySettings({ collaborationMode: options.collaborationMode });
+        const mode = options.collaborationMode;
+        if (!mode) return;
+        if (this.closed || this.stopping || this.reconnecting || !this.client.isInitialized()) {
+            throw new Error('Codex settings are unavailable while disconnected or stopping');
+        }
+        // Startup restores the requested mode from this binding's native
+        // snapshot. An unchanged mode emits no new settings notification;
+        // preserve its existing model, effort and custom instructions.
+        if (record(this.settingsNative.collaborationMode).mode === mode) return;
+        await this.applySettings({ collaborationMode: mode });
     }
     private async implementPlan(planId: string): Promise<ImplementCodexPlanResult> {
         const unavailable = (): ImplementCodexPlanResult => ({ ok: false, code: 'unavailable', error: 'Codex is disconnected or stopping. Reconnect before implementing the plan.' });

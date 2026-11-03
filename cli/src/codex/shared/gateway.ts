@@ -135,6 +135,9 @@ export async function startCodexGateway(options: {
     return { endpoint, async close() {
         for (const [client, upstream] of connections) { client.terminate(); upstream.terminate(); }
         websocket.close();
+        // Bun can retain HTTP connections after WebSocket termination. Force
+        // them closed before close() starts waiting for the server to drain.
+        server.closeAllConnections();
         await new Promise<void>(resolve => server.close(() => resolve()));
         if (options.path) await unlink(options.path).catch(() => {});
     } };
