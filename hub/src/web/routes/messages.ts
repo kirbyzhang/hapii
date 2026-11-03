@@ -147,8 +147,7 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             attachments: parsed.data.attachments,
             sentFrom: 'webapp',
             scheduledAt: parsed.data.scheduledAt,
-            deliveryMode: parsed.data.deliveryMode,
-            ...(parsed.data.asyncQuestionAnswer ? { asyncQuestionAnswer: parsed.data.asyncQuestionAnswer } : {})
+            deliveryMode: parsed.data.deliveryMode
         })
         return c.json({ ok: true })
     })

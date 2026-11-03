@@ -10,7 +10,7 @@ vi.mock('cross-spawn', () => ({
     }
 }))
 
-import { getHapiRunnerProcessIdentity, getProcessStartMarker, getProcessStartMarkers, killProcess } from './process'
+import { getHapiRunnerProcessIdentity, killProcess } from './process'
 
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
 
@@ -40,59 +40,54 @@ function unavailable(command: string) {
     }
 }
 
-describe('batched process generation markers', () => {
-    beforeEach(() => {
-        setPlatform('linux')
-        spawnSyncMock.mockReset()
-        vi.spyOn(process, 'kill').mockReturnValue(true)
-    })
-    afterEach(() => {
-        vi.restoreAllMocks()
-        if (originalPlatformDescriptor) Object.defineProperty(process, 'platform', originalPlatformDescriptor)
-    })
-
-    it('preserves single-probe lstart formatting and rejects unrequested or malformed rows', () => {
-        const marker = 'Fri Oct  9 11:22:33 2026'
-        spawnSyncMock.mockImplementation((_cmd, args) => completed(args[3] === 'lstart='
-            ? `${marker}\n`
-            : `   111 ${marker}\n112 bad marker\n999 Fri Oct  9 11:22:33 2026\n`))
-        expect(getProcessStartMarkers([111, 112])).toEqual(new Map([[111, getProcessStartMarker(111)]]))
-        expect(spawnSyncMock.mock.calls[0][2]).toMatchObject({ env: { LC_ALL: 'C', TZ: 'UTC' }, timeout: 10000 })
-    })
-    it('deduplicates and rejects invalid PID values without unnecessary probes', () => {
-        spawnSyncMock.mockReturnValue(completed('111 Fri Oct  9 11:22:33 2026\n'))
-        expect(getProcessStartMarkers([]).size).toBe(0)
-        expect(spawnSyncMock).not.toHaveBeenCalled()
-        expect(getProcessStartMarkers([111, 111, 0, -1, 1.5, NaN, Infinity]).size).toBe(1)
-        expect(spawnSyncMock).toHaveBeenCalledTimes(1)
-        expect(spawnSyncMock.mock.calls[0][1]).toEqual(['-p', '111', '-o', 'pid=,lstart='])
-    })
-    it('leaves failed and missing generations unknown, while accepting a later successful batch', () => {
-        const pids = Array.from({ length: 257 }, (_, index) => index + 1)
-        spawnSyncMock.mockReturnValueOnce(unavailable('ps')).mockReturnValueOnce(completed('257 Fri Oct  9 11:22:33 2026\n'))
-        expect(getProcessStartMarkers(pids)).toEqual(new Map([[257, 'Fri Oct  9 11:22:33 2026']]))
-        expect(spawnSyncMock).toHaveBeenCalledTimes(2)
-        expect(spawnSyncMock.mock.calls[0][1][1].split(',')).toHaveLength(256)
-        expect(spawnSyncMock.mock.calls[1][1][1]).toBe('257')
-    })
-    it('does not trust stdout from a failed ps scan', () => {
-        spawnSyncMock.mockReturnValue(completed('111 Fri Oct  9 11:22:33 2026\n', 1))
-        expect(getProcessStartMarkers([111]).size).toBe(0)
-    })
-    it('retains Windows tasklist and UTC CIM generation probes', () => {
-        setPlatform('win32')
-        const marker = '2026-10-09T11:22:33.0000000Z'
-        spawnSyncMock.mockImplementation((cmd, args) => cmd === 'tasklist'
-            ? completed(`hapi.exe ${args[1].slice(7)} Console 1 200 K`)
-            : completed(marker))
-        expect(getProcessStartMarkers([111, 111, 222])).toEqual(new Map([[111, marker], [222, marker]]))
-        expect(spawnSyncMock.mock.calls.filter(call => call[0] === 'powershell')).toHaveLength(2)
-        expect(spawnSyncMock.mock.calls.some(call => call[0] === 'ps')).toBe(false)
-        expect(spawnSyncMock.mock.calls.find(call => call[0] === 'powershell')?.[1][3]).toContain("ToUniversalTime().ToString('o')")
-    })
-})
-
 describe('getHapiRunnerProcessIdentity on Windows', () => {
+    it.each(['', '[]', '{}', '{broken', JSON.stringify([{ ProcessId: 100, CreationDate: 'generation' }]),
+        JSON.stringify([{ ProcessId: process.pid }, { ProcessId: process.pid }]),
+        JSON.stringify([{ ProcessId: process.pid }, { ProcessId: 1.5 }]),
+        JSON.stringify([{ ProcessId: process.pid }, { ProcessId: -1 }])])(
+        'rejects an unverifiable complete process-generation snapshot: %s', async (stdout) => {
+            const { readWindowsProcessStartMarkers } = await import('./process')
+            spawnSyncMock.mockReturnValue(completed(stdout))
+            expect(readWindowsProcessStartMarkers()).toBeNull()
+        }
+    )
+
+    it('keeps present processes with unknown creation times distinct from absent processes', async () => {
+        const { readWindowsProcessStartMarkers } = await import('./process')
+        spawnSyncMock.mockReturnValue(completed(JSON.stringify([
+            { ProcessId: process.pid, CreationDate: 'scanner-generation' },
+            { ProcessId: 100, CreationDate: null }
+        ])))
+        const snapshot = readWindowsProcessStartMarkers()!
+        expect(snapshot.has(100)).toBe(true)
+        expect(snapshot.get(100)).toBeNull()
+        expect(snapshot.has(200)).toBe(false)
+    })
+
+    it('does not use stdout as a complete snapshot after a failed OS query', async () => {
+        const { readWindowsProcessStartMarkers } = await import('./process')
+        const stdout = JSON.stringify([{ ProcessId: process.pid, CreationDate: 'scanner-generation' }])
+        spawnSyncMock.mockReturnValue(completed(stdout, 1))
+        expect(readWindowsProcessStartMarkers()).toBeNull()
+        spawnSyncMock.mockReturnValue({ ...completed(stdout), error: new Error('query failed') })
+        expect(readWindowsProcessStartMarkers()).toBeNull()
+    })
+    it('reads the generation directly from CIM without a redundant tasklist probe', async () => {
+        const { getProcessStartMarker } = await import('./process')
+        spawnSyncMock.mockImplementation((command: string) => command === 'powershell'
+            ? completed('generation-100') : completed('hapi.exe 100 Console'))
+        expect(getProcessStartMarker(100)).toBe('generation-100')
+        expect(spawnSyncMock.mock.calls.filter(call => call[0] === 'tasklist')).toHaveLength(0)
+    })
+
+    it('keeps a missing CIM generation unknown and rejects invalid PIDs without probing', async () => {
+        const { getProcessStartMarker } = await import('./process')
+        spawnSyncMock.mockReturnValue(completed(''))
+        expect(getProcessStartMarker(100)).toBeNull()
+        spawnSyncMock.mockClear()
+        for (const pid of [0, -1, 1.5, NaN, Infinity]) expect(getProcessStartMarker(pid)).toBeNull()
+        expect(spawnSyncMock).not.toHaveBeenCalled()
+    })
     beforeAll(() => {
         if (!originalPlatformDescriptor?.configurable) {
             throw new Error('process.platform is not configurable in this runtime')
@@ -231,6 +226,50 @@ describe('getHapiRunnerProcessIdentity on Windows', () => {
 })
 
 describe('killProcess on Windows (orphanReap / stopSession)', () => {
+    it('includes slow liveness probes in the graceful shutdown deadline', async () => {
+        let graceStarted: number | undefined
+        let alive = true
+        let forcedAt: number | undefined
+        spawnSyncMock.mockImplementation((command: string, args: string[] = []) => {
+            if (command === 'tasklist') {
+                // A synchronous OS query consumes real time even though it is
+                // not part of the timer used to yield between observations.
+                vi.setSystemTime(Date.now() + 400)
+                return completed(alive ? 'hapi.exe 7788 Console' : 'INFO: No tasks')
+            }
+            if (command === 'taskkill' && args.includes('/F')) {
+                forcedAt = Date.now()
+                alive = false
+            } else if (command === 'taskkill') {
+                graceStarted = Date.now()
+            }
+            return completed('')
+        })
+        const stopped = killProcess(7788)
+        await vi.runAllTimersAsync()
+        await expect(stopped).resolves.toBe(true)
+        expect(forcedAt).toBeDefined()
+        expect(graceStarted).toBeDefined()
+        // The two-second wait plus the final observation and taskkill's own
+        // liveness recheck, each taking 400ms in this scenario.
+        expect(forcedAt! - graceStarted!).toBeLessThanOrEqual(2_800)
+    })
+
+    it('bounds slow probes after forced shutdown without treating a live process as stopped', async () => {
+        const started = Date.now()
+        spawnSyncMock.mockImplementation((command: string) => {
+            if (command === 'tasklist') {
+                vi.setSystemTime(Date.now() + 400)
+                return completed('hapi.exe 7788 Console')
+            }
+            return completed('')
+        })
+        const stopped = killProcess(7788, true)
+        await vi.runAllTimersAsync()
+        await expect(stopped).resolves.toBe(false)
+        expect(Date.now() - started).toBeLessThanOrEqual(3_200)
+    })
+
     beforeAll(() => {
         if (!originalPlatformDescriptor?.configurable) {
             throw new Error('process.platform is not configurable in this runtime')
@@ -387,137 +426,13 @@ describe('killProcess on Windows (orphanReap / stopSession)', () => {
         expect(taskkills[0]![1]).toEqual(['/F', '/T', '/PID', '9901'])
     })
 
-    it('killProcessTreeByPid signals surviving descendants after taskkill /T misses them', async () => {
-        // #1911 bot Major: taskkill /T exit 0 is "signalled", not "tree gone".
-        // When the root dies but a grandchild survives (broken intermediate link),
-        // individually signal survivors from the pre-kill snapshot — but only when
-        // the process-generation marker still matches (PID reuse guard).
-        const { killProcessTreeByPid } = await import('./process')
-        const alive = new Set([100, 200]) // 100=root, 200=descendant
-        const markers = new Map([[100, 'gen-100'], [200, 'gen-200']])
-        const taskkillPids: number[] = []
-        vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
-            if (signal === 0 || signal === undefined) {
-                if (!alive.has(pid)) {
-                    const err = new Error('ESRCH') as NodeJS.ErrnoException
-                    err.code = 'ESRCH'
-                    throw err
-                }
-                return true
-            }
-            return true
-        })
-        spawnSyncMock.mockImplementation((cmd: string, args: string[] = []) => {
-            if (cmd === 'powershell') {
-                const script = String(args[args.length - 1] ?? '')
-                if (script.includes('ParentProcessId')) {
-                    return completed('OK:200,100')
-                }
-                // getProcessStartMarker CIM probe
-                const filterMatch = /ProcessId = (\d+)/.exec(script)
-                if (filterMatch) {
-                    const pid = Number(filterMatch[1])
-                    if (!alive.has(pid)) return completed('')
-                    return completed(markers.get(pid) ?? '')
-                }
-                return completed('')
-            }
-            if (cmd === 'tasklist') {
-                const filter = args.find((a) => a.startsWith('PID eq '))
-                const pid = filter ? Number(filter.replace('PID eq ', '')) : NaN
-                if (!alive.has(pid)) {
-                    return completed('INFO: No tasks are running which match the specified criteria.')
-                }
-                return completed(`proc.exe                       ${pid} Console                    1     1,000 K`)
-            }
-            if (cmd === 'taskkill') {
-                const idx = args.indexOf('/PID')
-                const pid = Number(args[idx + 1])
-                taskkillPids.push(pid)
-                alive.delete(pid)
-                return completed('', 0)
-            }
-            return completed('')
-        })
-
-        const done = killProcessTreeByPid(100, true)
-        await vi.advanceTimersByTimeAsync(500)
-        await expect(done).resolves.toBe(true)
-        expect(taskkillPids).toContain(100)
-        expect(taskkillPids).toContain(200)
-        expect(alive.size).toBe(0)
-    })
-
-    it('killProcessTreeByPid does not kill a surviving PID that was reused', async () => {
-        const { killProcessTreeByPid } = await import('./process')
-        const alive = new Set([100, 200])
-        // After root kill, PID 200 is recycled with a new generation marker.
-        let rootGone = false
-        const taskkillPids: number[] = []
-        vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
-            if (signal === 0 || signal === undefined) {
-                if (!alive.has(pid)) {
-                    const err = new Error('ESRCH') as NodeJS.ErrnoException
-                    err.code = 'ESRCH'
-                    throw err
-                }
-                return true
-            }
-            return true
-        })
-        spawnSyncMock.mockImplementation((cmd: string, args: string[] = []) => {
-            if (cmd === 'powershell') {
-                const script = String(args[args.length - 1] ?? '')
-                if (script.includes('ParentProcessId')) {
-                    return completed('OK:200,100')
-                }
-                const filterMatch = /ProcessId = (\d+)/.exec(script)
-                if (filterMatch) {
-                    const pid = Number(filterMatch[1])
-                    if (!alive.has(pid)) return completed('')
-                    if (pid === 200 && rootGone) return completed('gen-200-reused')
-                    return completed(pid === 100 ? 'gen-100' : 'gen-200')
-                }
-                return completed('')
-            }
-            if (cmd === 'tasklist') {
-                const filter = args.find((a) => a.startsWith('PID eq '))
-                const pid = filter ? Number(filter.replace('PID eq ', '')) : NaN
-                if (!alive.has(pid)) {
-                    return completed('INFO: No tasks are running which match the specified criteria.')
-                }
-                return completed(`proc.exe                       ${pid} Console                    1     1,000 K`)
-            }
-            if (cmd === 'taskkill') {
-                const idx = args.indexOf('/PID')
-                const pid = Number(args[idx + 1])
-                taskkillPids.push(pid)
-                if (pid === 100) {
-                    alive.delete(100)
-                    rootGone = true
-                } else {
-                    alive.delete(pid)
-                }
-                return completed('', 0)
-            }
-            return completed('')
-        })
-
-        const done = killProcessTreeByPid(100, true)
-        await vi.advanceTimersByTimeAsync(500)
-        // Root signalled; reused descendant left alone → tree verify fails closed.
-        await expect(done).resolves.toBe(false)
-        expect(taskkillPids).toEqual([100])
-        expect(alive.has(200)).toBe(true)
-    })
-
     it('windowsProcessTreeCimCommand is newline-separated (WinPS-parseable)', async () => {
         // #1911 bot Major: `.join(' ')` yields `$seen=@{} $bfs=@()` — parse error.
         // Assert generated command text, not mocked stdout (mocks never parse PS).
         const { windowsProcessTreeCimCommand } = await import('./process')
         const cmd = windowsProcessTreeCimCommand(4242)
-        expect(cmd).toContain('$root=4242')
-        expect(cmd).toContain('ParentProcessId=$p')
+        expect(cmd).toContain('$root=[long]4242')
+        expect(cmd).toContain('ParentProcessId')
         // Statements must be on separate lines — spaces between `$x=@{}` tokens fail.
         expect(cmd).toContain('\n$seen=@{}')
         expect(cmd).toContain('\n$bfs=@()')
@@ -551,111 +466,6 @@ describe('killProcess on Windows (orphanReap / stopSession)', () => {
         expect(parseWindowsProcessTreeStdout('OK:200,100', 999)).toBe('scan_failed')
     })
 
-    it('killProcessTreeByPid treats bare root stdout (B1 fail-open shape) as scan_failed', async () => {
-        const { killProcessTreeByPid } = await import('./process')
-        let alive = true
-        vi.spyOn(process, 'kill').mockImplementation((_pid: number, signal?: string | number) => {
-            if (signal === 0 || signal === undefined) {
-                if (!alive) {
-                    const err = new Error('ESRCH') as NodeJS.ErrnoException
-                    err.code = 'ESRCH'
-                    throw err
-                }
-                return true
-            }
-            return true
-        })
-        spawnSyncMock.mockImplementation((cmd: string) => {
-            // Status 0 + root-only — the measured CIM-failure shape under SilentlyContinue.
-            if (cmd === 'powershell') return completed('1234')
-            if (cmd === 'tasklist') {
-                if (!alive) {
-                    return completed('INFO: No tasks are running which match the specified criteria.')
-                }
-                return completed(`proc.exe                      1234 Console                    1     1,000 K`)
-            }
-            if (cmd === 'taskkill') {
-                alive = false
-                return completed('', 0)
-            }
-            return completed('')
-        })
-        const done = killProcessTreeByPid(1234, true)
-        await vi.advanceTimersByTimeAsync(500)
-        await expect(done).resolves.toBe(false)
-        expect(spawnSyncMock.mock.calls.some((c) => c[0] === 'taskkill')).toBe(true)
-    })
-
-    it('killProcessTreeByPid signals root but returns false when Windows tree scan fails', async () => {
-        const { killProcessTreeByPid } = await import('./process')
-        let alive = true
-        vi.spyOn(process, 'kill').mockImplementation((_pid: number, signal?: string | number) => {
-            if (signal === 0 || signal === undefined) {
-                if (!alive) {
-                    const err = new Error('ESRCH') as NodeJS.ErrnoException
-                    err.code = 'ESRCH'
-                    throw err
-                }
-                return true
-            }
-            return true
-        })
-        spawnSyncMock.mockImplementation((cmd: string) => {
-            if (cmd === 'powershell') {
-                return { status: 1, stdout: Buffer.from(''), stderr: Buffer.from('parse error') }
-            }
-            if (cmd === 'tasklist') {
-                if (!alive) {
-                    return completed('INFO: No tasks are running which match the specified criteria.')
-                }
-                return completed(`proc.exe                       100 Console                    1     1,000 K`)
-            }
-            if (cmd === 'taskkill') {
-                alive = false
-                return completed('', 0)
-            }
-            return completed('')
-        })
-        const done = killProcessTreeByPid(100, true)
-        await vi.advanceTimersByTimeAsync(500)
-        await expect(done).resolves.toBe(false)
-        // Partial kill: root signalled, but never claim stopped without tree verify.
-        expect(spawnSyncMock.mock.calls.some((c) => c[0] === 'taskkill')).toBe(true)
-    })
-
-    it('killProcessTreeByPid signals root but returns false when Windows tree scan returns empty stdout', async () => {
-        const { killProcessTreeByPid } = await import('./process')
-        let alive = true
-        vi.spyOn(process, 'kill').mockImplementation((_pid: number, signal?: string | number) => {
-            if (signal === 0 || signal === undefined) {
-                if (!alive) {
-                    const err = new Error('ESRCH') as NodeJS.ErrnoException
-                    err.code = 'ESRCH'
-                    throw err
-                }
-                return true
-            }
-            return true
-        })
-        spawnSyncMock.mockImplementation((cmd: string) => {
-            if (cmd === 'powershell') return completed('') // status 0, empty — scan_failed
-            if (cmd === 'tasklist') {
-                if (!alive) {
-                    return completed('INFO: No tasks are running which match the specified criteria.')
-                }
-                return completed(`proc.exe                       100 Console                    1     1,000 K`)
-            }
-            if (cmd === 'taskkill') {
-                alive = false
-                return completed('', 0)
-            }
-            return completed('')
-        })
-        const done = killProcessTreeByPid(100, true)
-        await vi.advanceTimersByTimeAsync(500)
-        await expect(done).resolves.toBe(false)
-        expect(spawnSyncMock.mock.calls.some((c) => c[0] === 'taskkill')).toBe(true)
-    })
 })
 
 describe('killProcessTreeByPid on POSIX (pgrep tree scan)', () => {

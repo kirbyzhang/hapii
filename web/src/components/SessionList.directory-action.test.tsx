@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
 import type { SessionSummary } from '@/types/api'
+import type { ApiClient } from '@/api/client'
 import { I18nProvider } from '@/lib/i18n-context'
 import { ToastProvider } from '@/lib/toast-context'
 import { SessionList } from './SessionList'
@@ -59,6 +60,28 @@ function renderWithProviders(children: ReactNode) {
 }
 
 describe('SessionList directory action', () => {
+    it('reopens a locked list session and preserves its lock through a user rename', async () => {
+        const renameSession = vi.fn(async () => {})
+        const session = makeSession({ id: 'list-locked', updatedAt: Date.now(), metadata: {
+            path: '/work/locked', name: 'Locked list title', titleLocked: true, flavor: 'codex'
+        } })
+        renderWithProviders(<SessionList sessions={[session]} selectedSessionId={session.id} onSelect={vi.fn()}
+            onNewSession={vi.fn()} onRefresh={vi.fn()} isLoading={false} renderHeader={false}
+            api={{ renameSession } as unknown as ApiClient} />)
+        const open = () => {
+            fireEvent.contextMenu(screen.getByRole('button', { name: /Locked list title/ }))
+            fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+        }
+        open()
+        expect(screen.getByRole('button', { name: 'Lock title against agent updates' })).toHaveAttribute('aria-pressed', 'true')
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+        open()
+        expect(screen.getByRole('button', { name: 'Lock title against agent updates' })).toHaveAttribute('aria-pressed', 'true')
+        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New human title' } })
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+        await waitFor(() => expect(renameSession).toHaveBeenCalledWith('list-locked', 'New human title', true))
+    })
+
     it('starts a new session with the project machine and directory', () => {
         const onNewSessionInDirectory = vi.fn()
         const session = makeSession({
@@ -364,6 +387,200 @@ describe('SessionList action menu parity', () => {
 
         expect(screen.getByRole('dialog')).toBeInTheDocument()
         expect(screen.getByRole('heading', { name: 'Export conversation' })).toBeInTheDocument()
+    })
+})
+
+describe('SessionList fork session action', () => {
+    it('forks a supported active session from the menu and opens the child', async () => {
+        const forkConversation = vi.fn(async () => ({ sessionId: 'child-session' }))
+        const onSelect = vi.fn()
+        const session = makeSession({
+            id: 'source-session',
+            active: true,
+            updatedAt: Date.now(),
+            metadata: {
+                path: '/work/source',
+                name: 'Source session',
+                flavor: 'codex',
+                conversationHistory: { forkCurrent: true, forkAtMessage: true },
+            },
+        })
+        renderWithProviders(<SessionList sessions={[session]} selectedSessionId={session.id} onSelect={onSelect}
+            onNewSession={vi.fn()} onRefresh={vi.fn()} isLoading={false} renderHeader={false}
+            api={{ forkConversation } as unknown as ApiClient} />)
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Source session/ }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Fork session' }))
+        const dialog = screen.getByRole('dialog')
+        expect(within(dialog).getByRole('heading', { name: 'Fork session' })).toBeInTheDocument()
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }))
+
+        await waitFor(() => expect(forkConversation).toHaveBeenCalledWith('source-session'))
+        expect(onSelect).toHaveBeenCalledWith('child-session')
+    })
+
+    it('keeps Fork session disabled while the source turn is running', () => {
+        const session = makeSession({
+            id: 'running-source',
+            active: true,
+            thinking: true,
+            metadata: {
+                path: '/work/running',
+                name: 'Running source',
+                flavor: 'codex',
+                conversationHistory: { forkCurrent: true },
+            },
+        })
+        renderWithProviders(<SessionList sessions={[session]} selectedSessionId={null} onSelect={vi.fn()}
+            onNewSession={vi.fn()} onRefresh={vi.fn()} isLoading={false} renderHeader={false}
+            api={{ forkConversation: vi.fn() } as unknown as ApiClient} />)
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Running source/ }))
+        expect(screen.getByRole('menuitem', { name: 'Fork session' })).toHaveAttribute('aria-disabled', 'true')
+        expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('hides Fork session for locally controlled sessions', () => {
+        const session = {
+            ...makeSession({
+                id: 'locally-controlled',
+                active: true,
+                metadata: {
+                    path: '/work/local',
+                    name: 'Locally controlled session',
+                    flavor: 'claude',
+                    conversationHistory: { forkCurrent: true },
+                },
+            }),
+            agentState: { controlledByUser: true, requests: {} },
+        } as SessionSummary
+        renderWithProviders(<SessionList sessions={[session]} selectedSessionId={null} onSelect={vi.fn()}
+            onNewSession={vi.fn()} onRefresh={vi.fn()} isLoading={false} renderHeader={false}
+            api={{ forkConversation: vi.fn() } as unknown as ApiClient} />)
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Locally controlled session/ }))
+        expect(screen.queryByRole('menuitem', { name: 'Fork session' })).toBeNull()
+    })
+
+    it('hides Fork session when the active session does not advertise current-fork support', () => {
+        const session = makeSession({
+            id: 'unsupported-source',
+            active: true,
+            metadata: { path: '/work/unsupported', name: 'Unsupported source', flavor: 'gemini' },
+        })
+        renderWithProviders(<SessionList sessions={[session]} selectedSessionId={null} onSelect={vi.fn()}
+            onNewSession={vi.fn()} onRefresh={vi.fn()} isLoading={false} renderHeader={false}
+            api={{ forkConversation: vi.fn() } as unknown as ApiClient} />)
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Unsupported source/ }))
+        expect(screen.queryByRole('menuitem', { name: 'Fork session' })).toBeNull()
+    })
+
+    it('forks an archived Codex session directly from the list menu', async () => {
+        const forkConversation = vi.fn(async () => ({ sessionId: 'archived-child' }))
+        const onSelect = vi.fn()
+        const session = makeSession({
+            id: 'archived-source',
+            active: false,
+            metadata: {
+                path: '/work/archived',
+                machineId: 'machine-1',
+                name: 'Archived source',
+                flavor: 'codex',
+                lifecycleState: 'archived',
+                agentSessionId: 'native-source',
+            },
+        })
+        renderWithProviders(<SessionList sessions={[session]} selectedSessionId={null} onSelect={onSelect}
+            onNewSession={vi.fn()} onRefresh={vi.fn()} isLoading={false} renderHeader={false}
+            api={{ forkConversation } as unknown as ApiClient} />)
+
+        fireEvent.click(screen.getByTitle('/work/archived'))
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Archived source/ }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Fork session' }))
+        const dialog = screen.getByRole('dialog')
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }))
+
+        await waitFor(() => expect(forkConversation).toHaveBeenCalledWith('archived-source'))
+        expect(onSelect).toHaveBeenCalledWith('archived-child')
+    })
+
+    it('keeps the dialog open and reports a fork failure without navigating', async () => {
+        const forkConversation = vi.fn(async () => { throw new Error('fork failed') })
+        const onSelect = vi.fn()
+        const session = makeSession({
+            id: 'failing-source',
+            active: true,
+            metadata: {
+                path: '/work/failing',
+                name: 'Failing source',
+                flavor: 'codex',
+                conversationHistory: { forkCurrent: true },
+            },
+        })
+        renderWithProviders(<SessionList sessions={[session]} selectedSessionId={null} onSelect={onSelect}
+            onNewSession={vi.fn()} onRefresh={vi.fn()} isLoading={false} renderHeader={false}
+            api={{ forkConversation } as unknown as ApiClient} />)
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Failing source/ }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Fork session' }))
+        const dialog = screen.getByRole('dialog')
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }))
+
+        await waitFor(() => expect(within(dialog).getByText('fork failed')).toBeInTheDocument())
+        expect(onSelect).not.toHaveBeenCalled()
+        expect(dialog).toBeInTheDocument()
+    })
+})
+
+describe('SessionList selection', () => {
+    it('does not select the row that moves under the pointer during a live reorder', () => {
+        const onSelect = vi.fn()
+        const first = makeSession({
+            id: 'session-first',
+            active: true,
+            updatedAt: 200,
+            lastUserMessageAt: 200,
+            metadata: { path: '/work/hapi', name: 'First session', flavor: 'codex' }
+        })
+        const second = makeSession({
+            id: 'session-second',
+            active: true,
+            updatedAt: 100,
+            lastUserMessageAt: 100,
+            metadata: { path: '/work/hapi', name: 'Second session', flavor: 'codex' }
+        })
+
+        const renderList = (sessions: SessionSummary[]) => (
+            <QueryClientProvider client={new QueryClient()}>
+                <ToastProvider>
+                    <I18nProvider>
+                        <SessionList
+                            sessions={sessions}
+                            selectedSessionId={null}
+                            onSelect={onSelect}
+                            onNewSession={vi.fn()}
+                            onRefresh={vi.fn()}
+                            isLoading={false}
+                            renderHeader={false}
+                            api={null}
+                        />
+                    </I18nProvider>
+                </ToastProvider>
+            </QueryClientProvider>
+        )
+
+        const { rerender } = render(renderList([first, second]))
+        fireEvent.mouseDown(screen.getByRole('button', { name: /First session/ }), { button: 0 })
+
+        rerender(renderList([
+            { ...first, updatedAt: 200 },
+            { ...second, updatedAt: 300, lastUserMessageAt: 300 }
+        ]))
+
+        fireEvent.mouseUp(screen.getByRole('button', { name: /Second session/ }), { button: 0 })
+
+        expect(onSelect).not.toHaveBeenCalled()
     })
 })
 
@@ -790,6 +1007,85 @@ describe('SessionList collapse behavior', () => {
         // The section stays reported open while searching even though the
         // underlying collapsed state is still set.
         expect(screen.getByTitle('In progress').getAttribute('aria-expanded')).toBe('true')
+    })
+
+    it('allows a directory group to collapse while searching', () => {
+        const sessions = [
+            makeSession({
+                id: 'session-match',
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Matching task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-other',
+                updatedAt: 90,
+                metadata: { path: '/work/hapi', name: 'Other task', flavor: 'codex' },
+            }),
+        ]
+        render(renderSessionList(sessions, null))
+
+        const projectHeader = screen.getByTitle('/work/hapi')
+        const projectPanel = projectHeader.nextElementSibling
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+
+        // Establish a manual collapsed state before filtering. The filter
+        // still opens the group by default so matching sessions remain visible.
+        fireEvent.click(projectHeader)
+        fireEvent.click(projectHeader)
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: SEARCH_LABEL }))
+        const searchInput = screen.getByPlaceholderText(SEARCH_PLACEHOLDER)
+        fireEvent.change(searchInput, {
+            target: { value: 'Matching' },
+        })
+
+        expect(projectPanel?.getAttribute('data-open')).toBe('true')
+
+        fireEvent.click(projectHeader)
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+
+        fireEvent.click(projectHeader)
+        expect(projectPanel?.getAttribute('data-open')).toBe('true')
+
+        fireEvent.change(searchInput, { target: { value: '' } })
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+    })
+
+    it('restores a selected group collapse after filtering excludes the selected session', async () => {
+        const sessions = [
+            makeSession({
+                id: 'session-selected',
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Selected task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-match',
+                updatedAt: 90,
+                metadata: { path: '/work/hapi', name: 'Matching task', flavor: 'codex' },
+            }),
+        ]
+        render(renderSessionList(sessions, 'session-selected'))
+
+        const projectHeader = screen.getByTitle('/work/hapi')
+        const projectPanel = projectHeader.nextElementSibling
+        await waitFor(() => {
+            expect(projectPanel?.getAttribute('data-open')).toBe('true')
+        })
+
+        fireEvent.click(projectHeader)
+        expect(projectPanel?.getAttribute('data-open')).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: SEARCH_LABEL }))
+        const searchInput = screen.getByPlaceholderText(SEARCH_PLACEHOLDER)
+        fireEvent.change(searchInput, { target: { value: 'Matching' } })
+        expect(screen.queryByRole('button', { name: /Selected task/ })).toBeNull()
+        expect(screen.getByRole('button', { name: /Matching task/ })).toBeInTheDocument()
+
+        fireEvent.change(searchInput, { target: { value: '' } })
+        await waitFor(() => {
+            expect(projectPanel?.getAttribute('data-open')).toBeNull()
+        })
     })
 
     it('toggles the running section with the keyboard', () => {

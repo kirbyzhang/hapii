@@ -3,20 +3,13 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-const state = vi.hoisted(() => ({ home: '', auth: 'token', processes: new Map<number, string | undefined>(), batches: [] as number[][], afterSnapshot: undefined as (() => void) | undefined }));
+const state = vi.hoisted(() => ({ home: '', auth: 'token', processes: new Map<number, string | undefined>() }));
 vi.mock('@/configuration', () => ({ configuration: { get happyHomeDir() { return state.home; }, apiUrl: 'hub', get cliApiToken() { return state.auth; } } }));
-vi.mock('@/utils/process', () => ({ isProcessAlive: (pid: number) => state.processes.has(pid), getProcessStartMarker: (pid: number) => state.processes.get(pid),
-    getProcessStartMarkers: (pids: number[]) => {
-        state.batches.push(pids);
-        const snapshot = new Map(pids.flatMap(pid => { const marker = state.processes.get(pid); return marker ? [[pid, marker] as const] : []; }));
-        state.afterSnapshot?.();
-        return snapshot;
-    }
-}));
-import { filterRuntimesThatMayBeAlive, findRuntime, readRuntimes, runtimeAlive, runtimeAuthHash, runtimeMayBeAlive, saveRuntime, withThreadOwnership, type CodexRuntimeRecord } from './registry';
+vi.mock('@/utils/process', () => ({ isProcessAlive: (pid: number) => state.processes.has(pid), getProcessStartMarker: (pid: number) => state.processes.get(pid) }));
+import { findRuntime, readRuntimes, runtimeAlive, runtimeAuthHash, runtimeMayBeAlive, saveRuntime, withThreadOwnership, type CodexRuntimeRecord } from './registry';
 
 const directories: string[] = [];
-afterEach(async () => { state.processes.clear(); state.batches.length = 0; state.afterSnapshot = undefined; state.auth = 'token'; await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => { state.processes.clear(); state.auth = 'token'; await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 async function fixture(): Promise<CodexRuntimeRecord> {
     const home = await mkdtemp(join(tmpdir(), 'hapi-owner-')); directories.push(home); state.home = join(home, 'hapi');
     return { id: 'owner', pid: 1111, marker: 'worker-start', serverPid: 2222, serverMarker: 'server-start', command: 'codex', args: [],
@@ -24,38 +17,40 @@ async function fixture(): Promise<CodexRuntimeRecord> {
         sessions: { sid: { threadId: 'thread', namespace: 'ns', active: true } } };
 }
 describe('shared runtime ownership', () => {
-    it('excludes a process that exits after its generation snapshot', async () => {
+    it('uses one complete process snapshot without per-record OS probes', async () => {
         const owner = await fixture();
-        state.processes.set(owner.pid, owner.marker);
-        state.afterSnapshot = () => state.processes.delete(owner.pid);
-        expect(filterRuntimesThatMayBeAlive([owner])).toEqual([]);
-        expect(state.batches).toEqual([[owner.pid]]);
+        const probe = vi.spyOn(state.processes, 'has');
+        try {
+            for (let scan = 0; scan < 3; scan++) {
+                for (let index = 0; index < 50; index++) {
+                    expect(runtimeMayBeAlive({ ...owner, pid: 3000 + index, serverPid: 4000 + index }, new Map())).toBe(false);
+                }
+            }
+            expect(probe).not.toHaveBeenCalled();
+        } finally { probe.mockRestore(); }
     });
-    it('protects a process born after the initial liveness scan with an unknown snapshot generation', async () => {
+    it('retains live wrappers, orphan engines and unknown generations in a fresh snapshot', async () => {
         const owner = await fixture();
-        state.afterSnapshot = () => state.processes.set(owner.pid, 'new-generation');
-        expect(filterRuntimesThatMayBeAlive([owner])).toEqual([owner]);
-        expect(state.batches).toEqual([[]]);
+        expect(runtimeMayBeAlive(owner, new Map([[1111, owner.marker]]))).toBe(true);
+        expect(runtimeMayBeAlive(owner, new Map([[2222, owner.serverMarker!]]))).toBe(true);
+        expect(runtimeMayBeAlive(owner, new Map([[1111, null]]))).toBe(true);
+        expect(runtimeMayBeAlive({ ...owner, serverMarker: undefined }, new Map([[2222, 'unverified-start']]))).toBe(true);
     });
-    it('batch filtering preserves dead, reused, unknown, live and orphan-engine decisions', async () => {
-        const base = await fixture();
-        const owners = Array.from({ length: 6 }, (_, index) => ({ ...base, id: `owner-${index}`, pid: 100 + index, serverPid: 200 + index }));
-        state.processes.set(101, 'reused'); state.processes.set(201, 'reused-engine');
-        state.processes.set(102, undefined);
-        state.processes.set(103, base.marker);
-        state.processes.set(204, base.serverMarker);
-        state.processes.set(105, 'reused'); state.processes.set(205, undefined);
-        const expected = owners.filter(runtimeMayBeAlive);
-        expect(filterRuntimesThatMayBeAlive(owners)).toEqual(expected);
-        expect(expected.map(owner => owner.id)).toEqual(['owner-2', 'owner-3', 'owner-4', 'owner-5']);
-        expect(state.batches).toHaveLength(1);
-        expect(state.batches[0]).not.toContain(100);
-        expect(state.batches[0]).toContain(204);
+    it('does not confuse old runtime generations with reused PIDs or retain a stale live snapshot', async () => {
+        const owner = await fixture(); state.processes.set(1111, owner.marker);
+        expect(runtimeMayBeAlive(owner, new Map([[1111, 'new-wrapper'], [2222, 'new-engine']]))).toBe(false);
+        expect(runtimeMayBeAlive(owner, new Map())).toBe(false);
+        expect(runtimeMayBeAlive(owner, new Map([[1111, owner.marker]]))).toBe(true);
     });
-    it('keeps a live engine with an unknown stored generation while its wrapper is dead', async () => {
-        const owner = await fixture(); delete owner.serverMarker;
-        state.processes.set(owner.serverPid!, 'known-engine-generation');
-        expect(filterRuntimesThatMayBeAlive([owner])).toEqual([owner]);
+    it('uses one supplied snapshot without weakening orphan-engine and unknown-marker protection', async () => {
+        const owner = await fixture();
+        const table: import('@/utils/windowsProcessStop').WindowsProcessTable = new Map([[1111, { parentPid: 1, marker: 'reused', name: '', commandLine: '' }],
+            [2222, { parentPid: 1, marker: 'server-start', name: '', commandLine: '' }]]);
+        expect(runtimeMayBeAlive(owner, table)).toBe(true);
+        table.delete(2222); expect(runtimeMayBeAlive(owner, table)).toBe(false);
+        table.set(1111, { parentPid: 1, marker: null, name: '', commandLine: '' });
+        expect(runtimeMayBeAlive(owner, table)).toBe(true);
+        expect(runtimeMayBeAlive(owner, null)).toBe(true);
     });
     it('distinguishes PID reuse from an unknown generation and a live orphan engine', async () => {
         const owner = await fixture(); state.processes.set(1111, 'different-start');

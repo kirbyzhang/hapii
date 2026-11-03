@@ -12,8 +12,34 @@ describe('ApiClient error mapping', () => {
         globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
     })
 
+    it('passes an optional maxBytes bound to session file reads', async () => {
+        fetchMock.mockResolvedValueOnce(
+            new Response(JSON.stringify({ success: true, content: '' }), { status: 200 })
+        )
+
+        const api = new ApiClient('test-token')
+        await api.readSessionFile('session-1', 'images/page.png', 10 * 1024 * 1024)
+
+        expect(String(fetchMock.mock.calls[0]?.[0])).toContain('path=images%2Fpage.png')
+        expect(String(fetchMock.mock.calls[0]?.[0])).toContain('maxBytes=10485760')
+    })
+
     afterEach(() => {
         globalThis.fetch = originalFetch
+    })
+
+    it('passes cancellation through to session file search', async () => {
+        const controller = new AbortController()
+        fetchMock.mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+            init.signal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+        }))
+        const api = new ApiClient('test-token')
+        const request = api.searchSessionFiles('session /', 'some path', 50, controller.signal)
+        const rejected = expect(request).rejects.toMatchObject({ name: 'AbortError' })
+        expect(fetchMock.mock.calls[0][0]).toBe('/api/sessions/session%20%2F/files?query=some+path&limit=50')
+        expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal)
+        controller.abort()
+        await rejected
     })
 
     it('prefers the stable `code` field over the human-readable `error` message in ApiError.code', async () => {
@@ -361,26 +387,6 @@ describe('ApiClient Kimi session model discovery', () => {
     })
 })
 
-describe('ApiClient async question answers', () => {
-    it('posts answer metadata through the ordinary message endpoint', async () => {
-        const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
-        const originalFetch = globalThis.fetch
-        globalThis.fetch = fetchMock
-        try {
-            const api = new ApiClient('test-token')
-            const asyncQuestionAnswer = { questionId: 'question-1', answers: { q0: { answers: ['Alpha'] } } }
-            await api.sendMessage('session-1', 'Choose\nAlpha', 'codex-async-answer:question-1', undefined, undefined, undefined, asyncQuestionAnswer)
-            expect(fetchMock).toHaveBeenCalledTimes(1)
-            const [url, options] = fetchMock.mock.calls[0]
-            expect(url).toContain('/api/sessions/session-1/messages')
-            expect(options.method).toBe('POST')
-            expect(JSON.parse(options.body)).toEqual({ text: 'Choose\nAlpha', localId: 'codex-async-answer:question-1', asyncQuestionAnswer })
-        } finally {
-            globalThis.fetch = originalFetch
-        }
-    })
-})
-
 describe('ApiClient auth proxy redirect', () => {
     let originalFetch: typeof globalThis.fetch
     let fetchMock: ReturnType<typeof vi.fn>
@@ -432,6 +438,5 @@ describe('ApiClient auth proxy redirect', () => {
         const api = new ApiClient('test-token', { baseUrl: 'https://hub.example' })
         await expect(api.getGeneratedImageBlob('session-1', 'image-1')).rejects.toBeInstanceOf(AuthProxyRedirectError)
         expect(fetchMock.mock.calls[1][1]).toMatchObject({ cache: 'force-cache', redirect: 'manual' })
-
     })
 })

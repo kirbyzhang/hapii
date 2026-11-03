@@ -31,32 +31,6 @@ describe('AppServerEventConverter', () => {
         })).toEqual([{ type: 'agent_message', message: footer }]);
     });
 
-    it.each(['commentary', 'partial_answer', 'final_answer'])('preserves scoped async question carriers with phase %s', phase => {
-        const converter = new AppServerEventConverter();
-        const questions = [{ title: 'Which option?', options: ['One', 'Two'] }];
-        for (const text of [footer, undefined]) {
-            const item = { id: `question-${text ? 'footer' : 'empty'}`, type: 'agentMessage', text, phase, delivery: 'async', questions };
-            const params = { threadId: 'thread', turnId: 'turn', item };
-            expect(converter.handleNotification('item/completed', params)).toEqual([{
-                type: 'agent_message', thread_id: 'thread', turn_id: 'turn',
-                message: text && phase === 'final_answer' ? footer : '', delivery: 'async', questions
-            }]);
-            expect(converter.handleNotification('item/completed', params)).toEqual([]);
-        }
-    });
-
-    it.each(['commentary', 'partial_answer'])('filters buffered %s text while retaining async questions', phase => {
-        const converter = new AppServerEventConverter();
-        const questions = [{ title: 'Which option?' }];
-        converter.handleNotification('item/agentMessage/delta', { itemId: 'question', delta: `Choose an option.\n${footer}` });
-        expect(converter.handleNotification('item/completed', {
-            item: { id: 'question', type: 'agentMessage', phase, delivery: 'async', questions }
-        })).toEqual([{ type: 'agent_message', message: 'Choose an option.', delivery: 'async', questions }]);
-        expect(converter.handleNotification('item/completed', {
-            item: { id: 'question', type: 'agentMessage', phase: 'final_answer' }
-        })).toEqual([]);
-    });
-
     it('leaves literal examples and malformed footers in commentary unchanged', () => {
         const converter = new AppServerEventConverter();
         for (const text of [`Example: ${footer}`, `${footer}\nMore explanation.`, 'AGENT_NOTIFY_SUMMARY {invalid}']) {
@@ -239,6 +213,16 @@ describe('AppServerEventConverter', () => {
             exit_code: 0,
             duration_ms: 42
         }]);
+    });
+
+    it('preserves command identity when completion arrives without a start', () => {
+        const converter = new AppServerEventConverter();
+        const events = converter.handleNotification('item/completed', {
+            item: { id: 'late-command', type: 'commandExecution', command: 'node server.js', cwd: '/repo',
+                status: 'failed', exitCode: -1, durationMs: 16_636_720 }
+        });
+        expect(events).toEqual([expect.objectContaining({ type: 'exec_command_end', call_id: 'late-command',
+            command: 'node server.js', cwd: '/repo', status: 'failed', exit_code: -1, duration_ms: 16_636_720 })]);
     });
 
     it('maps MCP tool call items', () => {
@@ -1225,6 +1209,20 @@ describe('AppServerEventConverter', () => {
             mime_type: 'image/png'
         }]);
         expect(JSON.stringify(events)).not.toContain(largeImageResult);
+    });
+
+    it('converts completed image views into viewed_image events keyed by the tool call', () => {
+        const converter = new AppServerEventConverter();
+
+        expect(converter.handleNotification('item/started', {
+            item: { id: 'exec-view-1', type: 'imageView', path: '/tmp/shot.png' }
+        })).toEqual([]);
+        expect(converter.handleNotification('item/completed', {
+            item: { id: 'exec-view-1', type: 'imageView', path: '/tmp/shot.png' }
+        })).toEqual([{ type: 'viewed_image', call_id: 'exec-view-1', path: '/tmp/shot.png' }]);
+        expect(converter.handleNotification('item/completed', {
+            item: { id: 'call-view-2', type: 'imageView', path: 'file:///tmp/a%20b.png' }
+        })).toEqual([{ type: 'viewed_image', call_id: 'call-view-2', path: '/tmp/a b.png' }]);
     });
 
     it('truncates large unhandled notification payloads before logging', () => {

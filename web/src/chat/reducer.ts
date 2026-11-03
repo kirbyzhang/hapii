@@ -1,12 +1,9 @@
-import { AsyncQuestionAnswerSchema } from '@hapi/protocol/asyncUserInput'
-import { isObject } from '@hapi/protocol'
-import type { ChatToolCall } from '@/chat/types'
 import type { AgentState } from '@/types/api'
 import type { AgentEvent, ChatBlock, NormalizedMessage, UsageData } from '@/chat/types'
 import type { ThreadGoal } from '@/types/api'
 import { traceMessages, type TracedMessage } from '@/chat/tracer'
 import { dedupeAgentEvents, foldApiErrorEvents } from '@/chat/reducerEvents'
-import { collectTitleChanges, collectToolIdsFromMessages, ensureToolBlock, getPermissions } from '@/chat/reducerTools'
+import { collectTitleChanges, ensureToolBlock, getPermissions } from '@/chat/reducerTools'
 import { reduceTimeline } from '@/chat/reducerTimeline'
 import { isRedundantGoalStatusMessageText } from '@hapi/protocol/messages'
 
@@ -52,7 +49,6 @@ export type LatestUsage = {
 
 export type ReduceChatBlocksOptions = {
     goalStateMessages?: NormalizedMessage[]
-    asyncQuestionAnswerMessages?: NormalizedMessage[]
 }
 
 function getLatestThreadGoal(normalized: NormalizedMessage[]): ThreadGoal | null {
@@ -111,40 +107,12 @@ function filterSilentGoalBlocks(blocks: ChatBlock[]): ChatBlock[] {
     return filtered
 }
 
-// Derive answer state from durable user rows, including rows still in the queue.
-// Rebuild on every reduction so canceling a queued answer restores the question.
-function applyAsyncQuestionAnswers(blocks: ChatBlock[], messages: NormalizedMessage[]): void {
-    const answers = new Map<string, NonNullable<ChatToolCall['asyncAnswer']>>()
-    for (const message of messages) {
-        if (message.role !== 'user' || message.status === 'failed' || !isObject(message.meta)) continue
-        const parsed = AsyncQuestionAnswerSchema.safeParse(message.meta.asyncQuestionAnswer)
-        if (!parsed.success) continue
-        answers.set(parsed.data.questionId, {
-            answers: parsed.data.answers,
-            status: message.invokedAt != null ? 'answered'
-                : message.deliveryState === 'indeterminate' ? 'indeterminate' : 'queued'
-        })
-    }
-    const visit = (entries: ChatBlock[]) => {
-        for (const block of entries) {
-            if (block.kind !== 'tool-call') continue
-            if (block.tool.name === 'request_user_input' && isObject(block.tool.input)
-                && block.tool.input.delivery === 'async') {
-                block.tool.asyncAnswer = answers.get(block.tool.id)
-            }
-            visit(block.children)
-        }
-    }
-    visit(blocks)
-}
-
 export function reduceChatBlocks(
     normalized: NormalizedMessage[],
     agentState: AgentState | null | undefined,
     options: ReduceChatBlocksOptions = {}
 ): { blocks: ChatBlock[]; hasReadyEvent: boolean; latestUsage: LatestUsage | null; latestGoal: ThreadGoal | null } {
     const permissionsById = getPermissions(agentState)
-    const toolIdsInMessages = collectToolIdsFromMessages(normalized)
     const titleChangesByToolUseId = collectTitleChanges(normalized)
 
     const traced = traceMessages(normalized)
@@ -167,25 +135,42 @@ export function reduceChatBlocks(
     const rootResult = reduceTimeline(root, reducerContext)
     let hasReadyEvent = rootResult.hasReadyEvent
 
-    // Synthesize a tool card only for a *pending* permission that has no tool
-    // call/result in the transcript — so the user can still answer it when its
-    // tool_use message hasn't loaded. A resolved request (approved/denied/
-    // canceled) is history: agentState keeps it in completedRequests, but
-    // synthesizing it here appends a card to the end of the timeline (there is
-    // no chronological re-sort), pinning a stale "answered" card above the
-    // composer forever. Resolved requests render only via their own message,
-    // when it is in the window.
+    // Synthesize a tool card only for a *pending* permission that is not
+    // rendered anywhere in the final block tree — so the user can still
+    // answer it when its tool_use message hasn't loaded. A resolved request
+    // (approved/denied/canceled) is history: agentState keeps it in
+    // completedRequests, but synthesizing it here appends a card to the end
+    // of the timeline (there is no chronological re-sort), pinning a stale
+    // "answered" card above the composer forever. Resolved requests render
+    // only via their own message, when it is in the window.
     // Also skip if the permission is older than the oldest message in the
     // current view, to avoid mixing old tool cards with newer messages when
     // paginating.
+    //
+    // The check must walk the *rendered* tree (including blocks nested under
+    // Task/Agent cards), not raw transcript ids: the tracer drops sidechain
+    // messages it cannot attribute to a parent Task (no parentToolUseId and
+    // no prompt-holding sidechain root — e.g. background subagents), so a
+    // raw-id check suppresses this fallback for a card that was never
+    // rendered, leaving the pending permission answerable nowhere
+    // (hapi#1073).
+    const renderedToolBlockIds = new Set<string>()
+    const collectRenderedToolBlockIds = (list: ChatBlock[]): void => {
+        for (const block of list) {
+            if (block.kind !== 'tool-call') continue
+            renderedToolBlockIds.add(block.id)
+            collectRenderedToolBlockIds(block.children)
+        }
+    }
+    collectRenderedToolBlockIds(rootResult.blocks)
+
     const oldestMessageTime = normalized.length > 0
         ? Math.min(...normalized.map(m => m.createdAt))
         : null
 
     for (const [id, entry] of permissionsById) {
         if (entry.permission.status !== 'pending') continue
-        if (toolIdsInMessages.has(id)) continue
-        if (rootResult.toolBlocksById.has(id)) continue
+        if (renderedToolBlockIds.has(id)) continue
 
         const createdAt = entry.permission.createdAt ?? Date.now()
 
@@ -204,8 +189,6 @@ export function reduceChatBlocks(
             permission: entry.permission
         })
     }
-
-    applyAsyncQuestionAnswers(rootResult.blocks, options.asyncQuestionAnswerMessages ?? normalized)
 
     // Calculate latest usage from messages (find the most recent message with usage data)
     let latestUsage: LatestUsage | null = null

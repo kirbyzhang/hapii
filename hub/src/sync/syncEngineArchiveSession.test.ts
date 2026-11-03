@@ -2,8 +2,8 @@ import { describe, expect, it, beforeEach } from 'bun:test'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
 import { SyncEngine } from './syncEngine'
-import { SessionArchiveStopUnconfirmedError } from './sessionArchiveStop'
-import { RpcTargetMissingError } from './rpcGateway'
+import { RpcTargetMissingError, RunnerStopRpcError } from './rpcGateway'
+import { ArchiveCleanupError } from './archiveCleanupError'
 import type { SessionCache } from './sessionCache'
 
 /**
@@ -64,58 +64,66 @@ describe('SyncEngine.archiveSession runner reaping (#1910)', () => {
     beforeEach(() => {
         store = new Store(':memory:')
         engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
-        ;(engine as unknown as { archiveStopConfirmationTimeoutMs: number }).archiveStopConfirmationTimeoutMs = 0
     })
 
-    it('retries the original session ID when shutdown finishes late without a PID marker', async () => {
-        const sessionId = insertActiveSession('late-id-stop', 'machine-x')
-        ;(engine as unknown as { archiveStopConfirmationTimeoutMs: number }).archiveStopConfirmationTimeoutMs = 3000
-        let kills = 0
-        const confirmations: string[] = []
-        const gateway = (engine as unknown as { rpcGateway: import('./rpcGateway').RpcGateway }).rpcGateway
-        gateway.killSession = async () => { kills++; return {} }
-        gateway.stopRunnerSession = async (_machine, id) => {
-            confirmations.push(id)
-            return confirmations.length < 3 ? 'unknown' : 'already_gone'
-        }
-        await engine.archiveSession(sessionId)
-        expect(kills).toBe(1)
-        expect(confirmations).toEqual([sessionId, sessionId, sessionId])
-        expect(cache().getSession(sessionId)?.metadata?.lifecycleState).toBe('archived')
-        expect(engine.isSessionArchiveUnconfirmed(sessionId)).toBe(false)
-    })
-
-    it('reports an explicit unconfirmed-stop error after the retry budget expires', async () => {
-        const sessionId = insertActiveSession('permanent-id-unknown', 'machine-x')
+    it('coalesces concurrent archive requests and releases the operation after completion', async () => {
+        const sessionId = insertActiveSession('concurrent-archive', 'machine-x')
         setKillSessionOk()
-        ;(engine as unknown as { rpcGateway: { stopRunnerSession: unknown } }).rpcGateway.stopRunnerSession = async () => 'unknown'
-        await expect(engine.archiveSession(sessionId)).rejects.toBeInstanceOf(SessionArchiveStopUnconfirmedError)
-        expect(engine.isSessionArchiveUnconfirmed(sessionId)).toBe(true)
-        expect(cache().getSession(sessionId)?.metadata?.lifecycleState).not.toBe('archived')
+        let release!: () => void
+        const gate = new Promise<void>(resolve => { release = resolve })
+        let calls = 0
+        ;(engine as unknown as { rpcGateway: { stopRunnerSession: unknown } }).rpcGateway.stopRunnerSession = async () => {
+            calls++
+            await gate
+            return 'already_gone'
+        }
+        const first = engine.archiveSession(sessionId)
+        const second = engine.archiveSession(sessionId)
+        await new Promise(resolve => setTimeout(resolve, 0))
+        const concurrentCalls = calls
+        release()
+        await Promise.all([first, second])
+        expect(concurrentCalls).toBe(1)
+        await engine.archiveSession(sessionId)
+        expect(calls).toBe(2)
     })
 
-    it('confirms a late inactive shared root without archiving its live sibling', async () => {
-        const metadata = {
-            path: '/tmp/proj', host: 'localhost', machineId: 'machine-x', flavor: 'codex' as const,
-            startedBy: 'runner' as const, capabilities: { concurrentClients: true }
+    it('reports lost runner confirmation without asserting the process is still running', async () => {
+        const sessionId = insertActiveSession('runner-confirmation-lost', 'machine-x')
+        setKillSessionOk()
+        ;(engine as unknown as { rpcGateway: { stopRunnerSession: unknown } }).rpcGateway.stopRunnerSession = async () => {
+            throw new Error('connection lost')
         }
-        const root = cache().getOrCreateSession('shared-root-late', { ...metadata, codexSessionId: 'native-root' }, null, NAMESPACE)
-        const sibling = cache().getOrCreateSession('shared-root-sibling', { ...metadata, codexSessionId: 'native-sibling' }, null, NAMESPACE)
-        cache().markSessionActive(root.id)
-        cache().markSessionActive(sibling.id)
-        ;(engine as unknown as { archiveStopConfirmationTimeoutMs: number }).archiveStopConfirmationTimeoutMs = 3000
-        const gateway = (engine as unknown as { rpcGateway: import('./rpcGateway').RpcGateway }).rpcGateway
-        const calls: string[] = []
-        gateway.killSession = async id => { engine.handleSessionEnd({ sid: id, time: Date.now() }); return {} }
-        gateway.stopRunnerSession = async (_machine, id) => {
-            calls.push(id)
-            return calls.length === 1 ? 'unknown' : 'already_gone'
-        }
-        await engine.archiveSession(root.id)
-        expect(calls).toEqual([root.id, root.id])
-        expect(cache().getSession(root.id)?.metadata?.lifecycleState).toBe('archived')
-        expect(cache().getSession(sibling.id)?.active).toBe(true)
-        expect(cache().getSession(sibling.id)?.metadata?.lifecycleState).not.toBe('archived')
+        await expect(engine.archiveSession(sessionId)).rejects.toThrow('Runner did not confirm session cleanup')
+        expect(cache().getSession(sessionId)?.active).toBe(true)
+    })
+
+    it('preserves timeout uncertainty, then permits a real cleanup confirmation on retry', async () => {
+        const sessionId = insertActiveSession('runner-confirmation-timeout', 'machine-x')
+        setKillSessionOk()
+        const gateway = (engine as unknown as { rpcGateway: { stopRunnerSession: unknown } }).rpcGateway
+        gateway.stopRunnerSession = async () => { throw new RunnerStopRpcError(true, new Error('operation has timed out')) }
+        const error = await engine.archiveSession(sessionId).catch(error => error)
+        expect(error).toBeInstanceOf(ArchiveCleanupError)
+        expect(error.status).toBe(504)
+        expect(cache().getSession(sessionId)?.active).toBe(true)
+        gateway.stopRunnerSession = async () => 'already_gone'
+        await engine.archiveSession(sessionId)
+        expect(cache().getSession(sessionId)?.metadata?.lifecycleState).toBe('archived')
+    })
+
+    it('gives Runner cleanup an archive-specific budget exceeding the ordinary RPC timeout', async () => {
+        const sessionId = insertActiveSession('runner-archive-budget', 'machine-x')
+        setKillSessionOk()
+        let timeoutMs = 0
+        ;(engine as unknown as { rpcGateway: { stopRunnerSession: unknown } }).rpcGateway.stopRunnerSession =
+            async (_machineId: string, _sid: string, opts: { timeoutMs: number }) => {
+                timeoutMs = opts.timeoutMs
+                return 'stopped'
+            }
+        await engine.archiveSession(sessionId)
+        expect(timeoutMs).toBeGreaterThan(30_000)
+        expect(timeoutMs).toBeLessThanOrEqual(90_000)
     })
 
     it('does not archive when the runner confirms still_alive after KillSession miss', async () => {

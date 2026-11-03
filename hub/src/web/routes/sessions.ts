@@ -1,4 +1,6 @@
+import { compareSessionSummaries } from '@hapi/protocol'
 import {
+    SessionReadStateRequestSchema,
     CursorMigrateToAcpRequestSchema,
     DeleteUploadRequestSchema,
     ForkConversationRequestSchema,
@@ -26,15 +28,16 @@ import {
     toSessionSummary,
     UploadFileRequestSchema
 } from '@hapi/protocol'
-import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+import { RPC_METHODS, RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
 import { Hono, type Context } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
-import { SessionArchiveStopUnconfirmedError } from '../../sync/sessionArchiveStop'
+import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
 import { loadScratchlistAttachmentLimitsFromEnv } from '../../config/scratchlistAttachmentLimits'
 import { validateScratchlistAttachmentsForWrite, scratchlistSessionBytesBeforeForPut } from '../../scratchlistAttachments/validate'
 import { TitleSuggestionError } from '../../sync/titleSuggestion'
+import { ArchiveCleanupError } from '../../sync/archiveCleanupError'
 import { requireSessionFromParam, requireSyncEngine } from './guards'
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -79,8 +82,6 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return engine
         }
 
-        const getPendingCount = (s: Session) => s.agentState?.requests ? Object.keys(s.agentState.requests).length : 0
-
         const namespace = c.get('namespace')
         const limitRaw = c.req.query('limit')
         const parsedLimit = limitRaw === undefined ? null : Number(limitRaw)
@@ -95,24 +96,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 if (order === 'updatedAt') {
                     return b.updatedAt - a.updatedAt
                 }
-                if (Boolean(a.globalPinned) !== Boolean(b.globalPinned)) {
-                    return a.globalPinned ? -1 : 1
-                }
-                if (Boolean(a.pinned) !== Boolean(b.pinned)) {
-                    return a.pinned ? -1 : 1
-                }
-                // Active sessions first (web session list)
-                if (a.active !== b.active) {
-                    return a.active ? -1 : 1
-                }
-                // Within active sessions, sort by pending requests count
-                const aPending = getPendingCount(a)
-                const bPending = getPendingCount(b)
-                if (a.active && aPending !== bPending) {
-                    return bPending - aPending
-                }
-                // Then by updatedAt
-                return b.updatedAt - a.updatedAt
+                return compareSessionSummaries(a, b)
             })
         if (limit !== null) {
             sessionRecords = sessionRecords.slice(0, limit)
@@ -129,6 +113,21 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         })
 
         return c.json({ sessions })
+    })
+
+    app.put('/sessions/:id/read-state', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const access = requireSessionFromParam(c, engine)
+        if (access instanceof Response) return access
+        // A revision belongs to one session ID. Never apply an old ID's
+        // pending operation to a replacement session via alias resolution.
+        if (access.sessionId !== c.req.param('id')) return c.json({ error: 'Session replaced' }, 409)
+        const body = SessionReadStateRequestSchema.safeParse(await c.req.json().catch(() => null))
+        if (!body.success) return c.json({ error: 'Invalid read state' }, 400)
+        const result = engine.updateReadState(access.sessionId, c.get('namespace'), body.data)
+        if (!result) return c.json({ error: 'Session not found' }, 404)
+        return c.json(result, result.status === 'invalid' ? 400 : result.status === 'conflict' ? 409 : 200)
     })
 
     app.get('/sessions/:id/export', (c) => {
@@ -372,7 +371,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return engine
         }
 
-        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        const sessionResult = requireSessionFromParam(c, engine)
         if (sessionResult instanceof Response) {
             return sessionResult
         }
@@ -452,23 +451,25 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         const lifecycleState = sessionResult.session.metadata?.lifecycleState
-        const stopUnconfirmed = engine.isSessionArchiveUnconfirmed(sessionResult.sessionId)
-        if (!sessionResult.session.active && lifecycleState === 'archived' && !stopUnconfirmed) {
+        const runnerOwned = sessionResult.session.metadata?.startedBy === 'runner'
+            || sessionResult.session.metadata?.startedFromRunner === true
+        if (!runnerOwned && !sessionResult.session.active && lifecycleState === 'archived') {
             return c.json({ ok: true, alreadyArchived: true })
         }
 
         // tiann/hapi#1820: `idle` is a live lifecycle too — a session the hub
         // reconciled as keepalive-only must stay archivable once its socket
         // finally drops, exactly like a stale `running` row.
-        if (!sessionResult.session.active && !isLiveLifecycleState(lifecycleState) && !stopUnconfirmed) {
+        if (!sessionResult.session.active && !isLiveLifecycleState(lifecycleState)
+            && !(runnerOwned && lifecycleState === 'archived')) {
             return c.json({ error: 'Session is inactive' }, 409)
         }
 
         try {
             await engine.archiveSession(sessionResult.sessionId)
         } catch (error) {
-            if (error instanceof SessionArchiveStopUnconfirmedError) {
-                return c.json({ error: error.message }, 409)
+            if (error instanceof ArchiveCleanupError) {
+                return c.json({ error: error.message, code: error.code }, error.status)
             }
             throw error
         }
@@ -609,9 +610,6 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (!isPermissionModeAllowedForFlavor(mode, flavor)) {
             return c.json({ error: 'Invalid permission mode for session flavor' }, 400)
         }
-        if (mode === 'safe-yolo' && sessionResult.session.metadata?.capabilities?.concurrentClients) {
-            return c.json({ error: 'Safe Yolo is not available for shared sessions' }, 400)
-        }
         if (flavor === 'opencode' && mode === 'plan' && sessionResult.session.agentState?.controlledByUser === true && !sessionResult.session.metadata?.capabilities?.concurrentClients) {
             return c.json({ error: 'OpenCode plan mode is only supported for remote sessions' }, 409)
         }
@@ -726,8 +724,15 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             }
         }
 
+        // Pi commits the model before setting its thinking level, so a failure
+        // in between would leave half of the request applied.
+        const { model, effort } = parsed.data
+        if (effort !== undefined && flavor !== 'claude' && flavor !== 'agy') {
+            return c.json({ error: 'Effort can only be sent with a model change for Claude and Antigravity sessions' }, 400)
+        }
+
         try {
-            await engine.applySessionConfig(sessionResult.sessionId, { model: parsed.data.model })
+            await engine.applySessionConfig(sessionResult.sessionId, effort === undefined ? { model } : { model, effort })
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to apply model'
@@ -855,11 +860,11 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const body = await c.req.json().catch(() => null)
         const parsed = RenameSessionRequestSchema.safeParse(body)
         if (!parsed.success) {
-            return c.json({ error: 'Invalid body: name is required' }, 400)
+            return c.json({ error: 'Invalid body: name or titleLocked is required' }, 400)
         }
 
         try {
-            await engine.renameSession(sessionResult.sessionId, parsed.data.name)
+            await engine.renameSession(sessionResult.sessionId, parsed.data.name, parsed.data.titleLocked)
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to rename session'
@@ -911,7 +916,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         try {
-            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text)
+            await engine.updateSessionSummary(sessionResult.sessionId, parsed.data.text, parsed.data.titleLocked)
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to update session summary'
@@ -1401,6 +1406,13 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             const result = await engine.listCodexModelsForSession(sessionResult.sessionId)
             return c.json(result)
         } catch (error) {
+            if (error instanceof RpcTargetMissingError) {
+                return c.json({
+                    success: false,
+                    error: error.message,
+                    code: RPC_TARGET_MISSING_ERROR_CODE
+                }, 503)
+            }
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list Codex models'

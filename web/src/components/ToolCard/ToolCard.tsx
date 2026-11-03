@@ -12,14 +12,15 @@ import { CodexPlanFooter } from '@/components/ToolCard/CodexPlanFooter'
 import { AskUserQuestionFooter } from '@/components/ToolCard/AskUserQuestionFooter'
 import { RequestUserInputFooter } from '@/components/ToolCard/RequestUserInputFooter'
 import { isAskUserQuestionToolName } from '@/components/ToolCard/askUserQuestion'
-import { isAsyncRequestUserInput, isRequestUserInputToolName } from '@/components/ToolCard/requestUserInput'
+import { isRequestUserInputToolName } from '@/components/ToolCard/requestUserInput'
 import { getToolPresentation } from '@/components/ToolCard/knownTools'
-import { getLatestCodexAgentReply, getToolFullViewComponent, getToolViewComponent } from '@/components/ToolCard/views/_all'
+import { getToolFullViewComponent, getToolViewComponent } from '@/components/ToolCard/views/_all'
 import { getToolResultViewComponent } from '@/components/ToolCard/views/_results'
 import { formatTaskChildLabel, TaskStateIcon } from '@/components/ToolCard/helpers'
 import { toolDurationMs } from '@/components/ToolCard/toolDuration'
 import { formatDuration, formatMessageTimestampTitle } from '@/chat/presentation'
-import type { TerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
+import { getToolGroupActionKind } from '@/chat/toolGroups'
+import type { TerminalToolDisplayMode } from '@/hooks/useToolCardDisplayMode'
 import { usePointerFocusRing } from '@/hooks/usePointerFocusRing'
 import { getInputStringAny, truncate } from '@/lib/toolInputUtils'
 import { cn } from '@/lib/utils'
@@ -28,22 +29,41 @@ import { TraceSection } from '@/components/ToolCard/trace'
 import { isSubagentToolName } from '@/chat/subagentTool'
 
 const ELAPSED_INTERVAL_MS = 1000
-const TERMINAL_RELATED_TOOL_NAMES = new Set(['Bash', 'CodexBash', 'shell_command', 'run_shell_command'])
+const TERMINAL_RELATED_TOOL_NAMES = new Set([
+    'Bash',
+    'CodexBash',
+    'shell_command',
+    'run_shell_command',
+    'Shell',
+    'bash',
+    'run_command',
+    'execute_command',
+    'terminal',
+])
 
-export function shouldUseCompactTerminalToolCard(toolName: string, terminalToolDisplayMode: TerminalToolDisplayMode): boolean {
-    return TERMINAL_RELATED_TOOL_NAMES.has(toolName) && terminalToolDisplayMode === 'compact'
+export function shouldUseCompactTerminalToolCard(
+    toolName: string,
+    terminalToolDisplayMode: TerminalToolDisplayMode,
+    terminalTool = TERMINAL_RELATED_TOOL_NAMES.has(toolName)
+): boolean {
+    return terminalTool && terminalToolDisplayMode === 'compact'
 }
 
 export function shouldShowInlineToolCardBody(
     toolName: string,
     presentationMinimal: boolean,
-    terminalToolDisplayMode: TerminalToolDisplayMode
+    terminalToolDisplayMode: TerminalToolDisplayMode,
+    terminalTool = TERMINAL_RELATED_TOOL_NAMES.has(toolName)
 ): boolean {
     if (isSubagentToolName(toolName)) return false
-    if (TERMINAL_RELATED_TOOL_NAMES.has(toolName)) {
+    if (terminalTool) {
         return terminalToolDisplayMode === 'detailed'
     }
     return !presentationMinimal
+}
+
+export function isTerminalToolBlock(block: ToolCallBlock): boolean {
+    return block.tool.name === 'CodexBash' || getToolGroupActionKind(block) === 'command'
 }
 
 export function getToolTimingDetails(tool: ChatToolCall, now: number): {
@@ -57,7 +77,7 @@ export function getToolTimingDetails(tool: ChatToolCall, now: number): {
 
     const active = tool.state === 'running'
     const hasExecPair = tool.execStartedAt != null && tool.execCompletedAt != null
-    const startedAt = active || !hasExecPair
+    const startedAt = tool.startUnavailable ? null : active || !hasExecPair
         ? (tool.startedAt ?? tool.createdAt)
         : tool.execStartedAt
     const completedAt = active
@@ -379,8 +399,8 @@ export function ToolDetailDialogContent(props: {
     const isRequestUserInput = isRequestUserInputToolName(toolName)
     const isQuestionTool = isAskUserQuestion || isRequestUserInput
     const isQuestionToolWithAnswers = isQuestionTool
-        && (permission?.answers || props.block.tool.asyncAnswer?.answers)
-        && Object.keys(permission?.answers ?? props.block.tool.asyncAnswer?.answers ?? {}).length > 0
+        && permission?.answers
+        && Object.keys(permission.answers).length > 0
     return (
         <div className="mt-3 flex max-h-[75vh] flex-col gap-4 overflow-auto">
             <ToolTimingDetails block={props.block} />
@@ -434,11 +454,11 @@ function ToolCardInner(props: ToolCardProps) {
         ? getSubagentModel(props.block.children, getInputStringAny(props.block.tool.input, ['model']))
         : null
     const isCodexAgentCard = toolName === 'CodexAgent'
-    const useCompactTerminalCard = shouldUseCompactTerminalToolCard(toolName, props.terminalToolDisplayMode)
-    const showInline = (isCodexAgentCard && getLatestCodexAgentReply(props.block) !== null)
-        || shouldShowInlineToolCardBody(toolName, presentation.minimal, props.terminalToolDisplayMode)
+    const isTerminalTool = isTerminalToolBlock(props.block)
+    const useCompactTerminalCard = shouldUseCompactTerminalToolCard(toolName, props.terminalToolDisplayMode, isTerminalTool)
+    const showInline = shouldShowInlineToolCardBody(toolName, presentation.minimal, props.terminalToolDisplayMode, isTerminalTool)
     const CompactToolView = showInline ? getToolViewComponent(toolName, props.block.tool) : null
-    const compactViewOwnsInteractions = toolName === 'CodexDiff' || isCodexAgentCard
+    const compactViewOwnsInteractions = toolName === 'CodexDiff'
     const ResultToolView = getToolResultViewComponent(toolName)
     const permission = props.block.tool.permission
     const isAskUserQuestion = isAskUserQuestionToolName(toolName)
@@ -448,8 +468,7 @@ function ToolCardInner(props: ToolCardProps) {
         permission.status === 'resolved' || permission.status === 'pending'
         || ((permission.status === 'denied' || permission.status === 'canceled') && Boolean(permission.reason))
     ))
-    const isAsyncQuestion = isRequestUserInput && isAsyncRequestUserInput(props.block.tool.input)
-    const hasBody = showInline || taskSummary !== null || showsPermissionFooter || isAsyncQuestion
+    const hasBody = showInline || taskSummary !== null || showsPermissionFooter
     // Header/content padding already supplies 12-16px below timing; add only
     // the remainder needed to match the detail dialog's 16px section gap.
     const inlineBodySpacing = props.block.tool.state === 'pending'
@@ -622,7 +641,7 @@ function ToolCardInner(props: ToolCardProps) {
                             disabled={props.disabled}
                             onDone={props.onDone}
                         />
-                    ) : isRequestUserInput && (permission?.status === 'pending' || isAsyncQuestion) ? (
+                    ) : isRequestUserInput && permission?.status === 'pending' ? (
                         <RequestUserInputFooter
                             api={props.api}
                             sessionId={props.sessionId}

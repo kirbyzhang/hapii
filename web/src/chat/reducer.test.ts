@@ -441,6 +441,101 @@ describe('reduceChatBlocks', () => {
         expect(block?.kind === 'tool-call' ? block.tool.permission?.status : null).toBe('pending')
     })
 
+    it('synthesizes a card for a pending permission whose sidechain tool_use was dropped by the tracer', () => {
+        // Regression (hapi#1073): background subagents arrive with no
+        // parentToolUseId and no prompt-holding sidechain root, so the tracer
+        // cannot attribute the chain to its parent Task and drops it as
+        // orphans. The raw transcript still contains the tool_use id, which
+        // used to suppress the orphan fallback — leaving the request pending
+        // in agentState with no answerable card anywhere.
+        const messages: NormalizedMessage[] = [
+            userMessage('u1', 'hello', 1_700_000_000_000),
+            {
+                id: 'agent-tool', localId: null, createdAt: 1_700_000_000_100, role: 'agent', isSidechain: false,
+                content: [{
+                    type: 'tool-call', id: 'toolu-task-1', name: 'Agent',
+                    input: { prompt: 'research a topic', subagent_type: 'general-purpose' },
+                    description: null, uuid: 'root-uuid-1', parentUUID: null
+                }]
+            },
+            {
+                id: 'sidechain-call', localId: null, createdAt: 1_700_000_000_200, role: 'agent', isSidechain: true,
+                parentToolUseId: null,
+                content: [{
+                    type: 'tool-call', id: 'toolu-sub-1', name: 'WebFetch',
+                    input: { url: 'https://example.com', prompt: 'summarize' },
+                    description: null, uuid: 'side-uuid-2', parentUUID: 'side-uuid-1'
+                }]
+            }
+        ]
+        const agentState = {
+            requests: {
+                'toolu-sub-1': {
+                    tool: 'WebFetch',
+                    arguments: { url: 'https://example.com', prompt: 'summarize' },
+                    createdAt: 1_700_000_000_200
+                }
+            },
+            completedRequests: {}
+        } as unknown as AgentState
+
+        const reduced = reduceChatBlocks(messages, agentState)
+        const block = reduced.blocks.find(b => b.kind === 'tool-call' && b.id === 'toolu-sub-1')
+        expect(block).toBeDefined()
+        expect(block?.kind === 'tool-call' ? block.tool.permission?.status : null).toBe('pending')
+    })
+
+    it('does not duplicate a pending permission card when its sidechain tool_use renders nested', () => {
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'agent-tool', localId: null, createdAt: 1_700_000_000_100, role: 'agent', isSidechain: false,
+                content: [{
+                    type: 'tool-call', id: 'toolu-task-1', name: 'Agent',
+                    input: { prompt: 'inspect the code', subagent_type: 'general-purpose' },
+                    description: null, uuid: 'root-uuid-1', parentUUID: null
+                }]
+            },
+            {
+                id: 'sidechain-call', localId: null, createdAt: 1_700_000_000_200, role: 'agent', isSidechain: true,
+                parentToolUseId: 'toolu-task-1',
+                content: [{
+                    type: 'tool-call', id: 'toolu-sub-2', name: 'WebFetch',
+                    input: { url: 'https://example.com', prompt: 'summarize' },
+                    description: null, uuid: 'side-uuid-1', parentUUID: null
+                }]
+            }
+        ]
+        const agentState = {
+            requests: {
+                'toolu-sub-2': {
+                    tool: 'WebFetch',
+                    arguments: { url: 'https://example.com', prompt: 'summarize' },
+                    createdAt: 1_700_000_000_200
+                }
+            },
+            completedRequests: {}
+        } as unknown as AgentState
+
+        const reduced = reduceChatBlocks(messages, agentState)
+
+        const countBlocksWithId = (list: typeof reduced.blocks, id: string): number =>
+            list.reduce((count, block) => {
+                const self = block.kind === 'tool-call' && block.id === id ? 1 : 0
+                const nested = block.kind === 'tool-call' ? countBlocksWithId(block.children, id) : 0
+                return count + self + nested
+            }, 0)
+        expect(countBlocksWithId(reduced.blocks, 'toolu-sub-2')).toBe(1)
+
+        // The single card must be nested under the Agent card, not a root-level orphan.
+        const agentCard = reduced.blocks.find(b => b.kind === 'tool-call' && b.id === 'toolu-task-1')
+        expect(
+            agentCard?.kind === 'tool-call'
+                ? agentCard.children.some(c => c.kind === 'tool-call' && c.id === 'toolu-sub-2')
+                : false
+        ).toBe(true)
+        expect(reduced.blocks.some(b => b.kind === 'tool-call' && b.id === 'toolu-sub-2')).toBe(false)
+    })
+
     it('attaches a result summary to the first block in the preceding contiguous assistant group', () => {
         const summary = {
             usage: { input_tokens: 100, output_tokens: 20 },
@@ -544,85 +639,4 @@ describe('reduceChatBlocks', () => {
         const assistant = reconciled.blocks.find(block => block.kind === 'agent-text')
         expect(assistant?.kind === 'agent-text' ? assistant.roundSummary : undefined).toEqual(summary)
     })
-})
-
-describe('async question answer state', () => {
-    const question: NormalizedMessage = {
-        id: 'question-row', localId: null, createdAt: 1, role: 'agent', isSidechain: false,
-        content: [{ type: 'tool-call', id: 'question-1', name: 'request_user_input',
-            input: { delivery: 'async', questions: [{ id: 'q0', question: 'Choose', options: [] }] },
-            description: null, uuid: 'question-row', parentUUID: null }]
-    }
-    const answer: NormalizedMessage = {
-        ...userMessage('answer-row', 'Choose\nAlpha', 2), invokedAt: null,
-        meta: { asyncQuestionAnswer: { questionId: 'question-1', answers: { q0: { answers: ['Alpha'] } } } }
-    }
-    const state = (messages: NormalizedMessage[]) => {
-        const blocks = reduceChatBlocks([question], null, { asyncQuestionAnswerMessages: messages }).blocks
-        const block = blocks.find((block) => block.kind === 'tool-call')
-        return block?.kind === 'tool-call' ? block.tool : undefined
-    }
-
-    it('derives queued state after reload, without creating a permission', () => {
-        expect(state([answer])?.asyncAnswer).toEqual({ answers: { q0: { answers: ['Alpha'] } }, status: 'queued' })
-        expect(state([answer])?.permission).toBeUndefined()
-    })
-
-    it('requires invokedAt for answered state, even if the row is marked sent', () => {
-        expect(state([{ ...answer, status: 'sent' }])?.asyncAnswer?.status).toBe('queued')
-        expect(state([{ ...answer, invokedAt: 3 }])?.asyncAnswer?.status).toBe('answered')
-    })
-
-    it('preserves delivery uncertainty until invocation is confirmed', () => {
-        expect(state([{ ...answer, deliveryState: 'indeterminate' }])?.asyncAnswer?.status).toBe('indeterminate')
-        expect(state([{ ...answer, deliveryState: 'indeterminate', invokedAt: 3 }])?.asyncAnswer?.status).toBe('answered')
-    })
-
-    it('restores unanswered state when a queued answer is removed or failed', () => {
-        state([answer])
-        expect(state([])?.asyncAnswer).toBeUndefined()
-        expect(state([{ ...answer, status: 'failed' }])?.asyncAnswer).toBeUndefined()
-    })
-
-    it('ignores malformed metadata and answers for different question ids', () => {
-        expect(state([{ ...answer, meta: { asyncQuestionAnswer: { questionId: 'question-1', answers: 'Alpha' } } }])?.asyncAnswer).toBeUndefined()
-        expect(state([{ ...answer, meta: { asyncQuestionAnswer: { questionId: 'other', answers: { q0: { answers: ['Alpha'] } } } } }])?.asyncAnswer).toBeUndefined()
-    })
-
-    it('normalizes persisted metadata and indeterminate delivery for queue state', () => {
-        const row: DecryptedMessage = {
-            id: 'answer', localId: 'codex-async-answer:question-1', seq: 1, createdAt: 2,
-            deliveryState: 'indeterminate', invokedAt: null,
-            content: { role: 'user', content: { type: 'text', text: 'Choose\nAlpha' }, meta: answer.meta }
-        }
-        const normalized = normalizeDecryptedMessage(row)!
-        expect(normalized.meta).toEqual(answer.meta)
-        expect(normalized.deliveryState).toBe('indeterminate')
-        expect(state([normalized])?.asyncAnswer?.status).toBe('indeterminate')
-    })
-})
-
-it('reconciles async answer changes, preserving references only for equal answers', () => {
-    const question: NormalizedMessage = {
-        id: 'question-row', localId: null, createdAt: 1, role: 'agent', isSidechain: false,
-        content: [{ type: 'tool-call', id: 'question-1', name: 'request_user_input',
-            input: { delivery: 'async', questions: [] }, description: null, uuid: 'question-row', parentUUID: null }]
-    }
-    const answer: NormalizedMessage = {
-        ...userMessage('answer-row', 'Alpha', 2), invokedAt: null,
-        meta: { asyncQuestionAnswer: { questionId: 'question-1', answers: { q0: { answers: ['Alpha'] } } } }
-    }
-    const reduce = (messages: NormalizedMessage[]) => reduceChatBlocks([question], null, { asyncQuestionAnswerMessages: messages }).blocks
-    const first = reconcileChatBlocks(reduce([]), new Map())
-    const queued = reconcileChatBlocks(reduce([answer]), first.byId)
-    expect(queued.blocks[0]).not.toBe(first.blocks[0])
-    const repeated = reconcileChatBlocks(reduce([answer]), queued.byId)
-    expect(repeated.blocks[0]).toBe(queued.blocks[0])
-    const answered = reconcileChatBlocks(reduce([{ ...answer, invokedAt: 3 }]), repeated.byId)
-    expect(answered.blocks[0]).not.toBe(repeated.blocks[0])
-    const changedAnswer = { ...answer, meta: { asyncQuestionAnswer: { questionId: 'question-1', answers: { q0: { answers: ['Beta'] } } } } }
-    const changed = reconcileChatBlocks(reduce([changedAnswer]), queued.byId)
-    expect(changed.blocks[0]).not.toBe(queued.blocks[0])
-    const canceled = reconcileChatBlocks(reduce([]), queued.byId)
-    expect(canceled.blocks[0]).not.toBe(queued.blocks[0])
 })

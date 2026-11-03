@@ -3,7 +3,6 @@ import {
     AGENT_FLAVORS,
     AgentFlavorSchema,
     CREATABLE_AGENT_FLAVORS,
-    getLaunchPermissionModesForFlavor,
     getPermissionModeLabel,
     getPermissionModeOptionsForFlavor,
     getPermissionModeTone,
@@ -102,7 +101,7 @@ describe('isPermissionModeAllowedForFlavor', () => {
     })
 
     test("codex offers autoReview at launch and mid-session", () => {
-        expect(getLaunchPermissionModesForFlavor('codex')).toEqual(['default', 'read-only', 'autoReview', 'yolo'])
+        expect(getPermissionModesForFlavor('codex')).toEqual(['default', 'read-only', 'autoReview', 'yolo'])
         expect(isPermissionModeAllowedForFlavor('autoReview', 'codex')).toBe(true)
         expect(isPermissionModeAllowedForFlavor('autoReview', 'gemini')).toBe(false)
     })
@@ -150,7 +149,7 @@ describe('isSteeringSupportedForFlavor', () => {
         expect(isSteeringSupportedForFlavor('codex')).toBe(true)
         expect(isSteeringSupportedForFlavor('cursor')).toBe(true)
         expect(isSteeringSupportedForFlavor('pi')).toBe(true)
-        expect(isSteeringSupportedForFlavor('claude')).toBe(false)
+        expect(isSteeringSupportedForFlavor('claude')).toBe(true)
         expect(isSteeringSupportedForFlavor('opencode')).toBe(false)
         expect(isSteeringSupportedForFlavor(undefined)).toBe(false)
         expect(isSteeringSupportedForFlavor(null)).toBe(false)
@@ -161,6 +160,7 @@ describe('isSteeringSupportedForSession', () => {
     it('supports codex and pi sessions', () => {
         expect(isSteeringSupportedForSession({ flavor: 'codex' })).toBe(true)
         expect(isSteeringSupportedForSession({ flavor: 'pi' })).toBe(true)
+        expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(true)
     })
 
     it('supports Cursor ACP sessions', () => {
@@ -185,7 +185,7 @@ describe('isSteeringSupportedForSession', () => {
     })
 
     it('rejects non-steerable flavors', () => {
-        expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
+        expect(isSteeringSupportedForSession({ flavor: 'opencode' })).toBe(false)
         expect(isSteeringSupportedForSession(null)).toBe(false)
     })
 })
