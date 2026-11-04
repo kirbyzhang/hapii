@@ -93,6 +93,30 @@ describe('SessionRowSummary background status', () => {
         expect(screen.queryByTestId('session-task-status')).toBeNull()
     })
 
+    it('keeps content-search snippets and truncation warnings alongside the compact working row', () => {
+        const snippet = 'Matching text from the conversation'
+        const warning = 'This message was truncated for search; some content may be missing.'
+        const { container } = render(
+            <I18nProvider>
+                <SessionRowSummary
+                    session={makeSummary({ thinking: true, backgroundTaskCount: 0, updatedAt: Date.now() })}
+                    selected
+                    showPath={false}
+                    contentSnippet={snippet}
+                    contentSearchTruncated
+                />
+            </I18nProvider>
+        )
+
+        expect(screen.getByText(snippet)).toHaveAttribute('title', `${snippet}\n${warning}`)
+        expect(screen.getByLabelText(warning)).toBeInTheDocument()
+        expect(screen.getByTitle('Background demo')).toHaveClass('font-normal')
+        expect(screen.getByText('just now')).toHaveClass('text-[var(--app-hint)]')
+        expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-[var(--app-badge-success-text)]')
+        expect(screen.queryByText('/demo/status')).toBeNull()
+        expect(screen.queryByTestId('session-presence')).toBeNull()
+    })
+
     it.each([false, true])('keeps foreground work green even with background tasks, then clears the spinner when quiet or disconnected (detailed=%s)', (showDetailedStatus) => {
         const row = (session: SessionSummary) => (
             <I18nProvider>
@@ -299,6 +323,21 @@ describe('SessionRowSummary background status', () => {
         expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('Bash')
         expect(container.querySelector('.text-\\[var\\(--app-badge-warning-text\\)\\] svg')).not.toBeNull()
         expect(container.querySelectorAll('.rounded-full')).toHaveLength(0)
+    })
+
+    it('marks a content-search snippet whose source message was truncated', () => {
+        render(
+            <I18nProvider>
+                <SessionRowSummary
+                    session={makeSummary()}
+                    contentSnippet="…tail phrase…"
+                    contentSearchTruncated={true}
+                />
+            </I18nProvider>
+        )
+
+        expect(screen.getByLabelText('This message was truncated for search; some content may be missing.'))
+            .toBeInTheDocument()
     })
 })
 

@@ -1,7 +1,7 @@
 import { useMemo, useSyncExternalStore } from 'react'
 import type { SessionSummary } from '@/types/api'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
-import { ScheduleIcon } from '@/components/icons'
+import { InfoIcon, ScheduleIcon } from '@/components/icons'
 import { HoverTooltip, SESSION_ROW_TOOLTIP_FOCUS_CLASS, useSessionRowTooltipIds } from '@/components/HoverTooltip'
 import { getAttentionLabel, SessionAttentionIndicator, SessionRequestIcon, SessionSpinner } from '@/components/SessionAttentionIndicator'
 import { classifySessionAttention } from '@/lib/sessionAttention'
@@ -97,6 +97,12 @@ export function SessionRowSummary(props: {
     projectLabel?: string
     /** Machine label shown next to the project name (pinned "in progress" rows). */
     machineLabel?: string
+    /** Context returned by the opt-in session message-content search. */
+    contentSnippet?: string
+    /** The indexed message exceeded the search index budget. */
+    contentSearchTruncated?: boolean
+    /** Yield the time/progress cluster to the official hover archive action. */
+    trailingClassName?: string
 }) {
     const {
         session: s,
@@ -111,6 +117,9 @@ export function SessionRowSummary(props: {
         inRunningSection = false,
         projectLabel,
         machineLabel,
+        contentSnippet,
+        contentSearchTruncated = false,
+        trailingClassName,
     } = props
     const { t } = useTranslation()
     const sessionName = getSessionTitle(s)
@@ -228,7 +237,7 @@ export function SessionRowSummary(props: {
                         </span>
                     ) : null}
                 </div>
-                <div className="flex min-w-0 items-center justify-end gap-2 overflow-hidden text-xs">
+                <div className={`flex min-w-0 items-center justify-end gap-2 overflow-hidden text-xs ${trailingClassName ?? ''}`}>
                     {todoProgress ? (
                         <span className="flex shrink-0 items-center gap-1 text-[var(--app-hint)]">
                             <BulbIcon className="h-3 w-3" />
@@ -245,6 +254,25 @@ export function SessionRowSummary(props: {
                     ) : null}
                 </div>
             </div>
+            {contentSnippet ? (
+                <div
+                    className="line-clamp-2 text-xs text-[var(--app-fg)]/80"
+                    title={contentSearchTruncated
+                        ? `${contentSnippet}\n${t('sessions.search.content.truncated')}`
+                        : contentSnippet}
+                >
+                    {contentSnippet}
+                    {contentSearchTruncated ? (
+                        <span
+                            className="ml-1 inline-flex align-[-2px] text-[var(--app-badge-warning-text)]"
+                            title={t('sessions.search.content.truncated')}
+                            aria-label={t('sessions.search.content.truncated')}
+                        >
+                            <InfoIcon className="h-3 w-3" />
+                        </span>
+                    ) : null}
+                </div>
+            ) : null}
             {pathLabel ? (
                 <div className="truncate text-xs text-[var(--app-hint)]" title={pathTitle}>
                     {pathLabel}
