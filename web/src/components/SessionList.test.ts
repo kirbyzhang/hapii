@@ -473,7 +473,7 @@ describe('getVisibleSessionPreview', () => {
         expect(preview.map(session => session.id)).toEqual(['s-1', 's-2', 's-3'])
     })
 
-    it('does not exceed the limit just because many sessions are active', () => {
+    it('keeps every connected session visible even above the preview limit', () => {
         const sessions = Array.from({ length: 6 }, (_, index) => makeSession({
             id: `s-${index + 1}`,
             active: true,
@@ -483,7 +483,19 @@ describe('getVisibleSessionPreview', () => {
 
         const preview = getVisibleSessionPreview(sessions, { limit: 4 })
 
-        expect(preview.map(session => session.id)).toEqual(['s-1', 's-2', 's-3', 's-4'])
+        expect(preview.map(session => session.id)).toEqual(['s-1', 's-2', 's-3', 's-4', 's-5', 's-6'])
+    })
+
+    it('collapses to connected sessions only, including working and waiting sessions', () => {
+        const sessions = [
+            makeSession({ id: 'closed-selected' }),
+            makeSession({ id: 'working', active: true, thinking: true }),
+            makeSession({ id: 'closed-pinned', pinned: true }),
+            makeSession({ id: 'waiting', active: true }),
+        ]
+        expect(getVisibleSessionPreview(sessions, { limit: 0, selectedSessionId: 'closed-selected' })
+            .map(session => session.id)).toEqual(['working', 'waiting'])
+        expect(getVisibleSessionPreview([sessions[0]], { limit: 0 })).toEqual([])
     })
 
     it('does not move an already-visible selected session to the top', () => {
@@ -632,9 +644,11 @@ describe('getPreviousSessionVisibleCount', () => {
         expect(getPreviousSessionVisibleCount(12, 8)).toBe(8)
     })
 
-    it('never goes below the preview limit', () => {
+    it('reaches the connected-only view after the default preview', () => {
         expect(getPreviousSessionVisibleCount(10, 8)).toBe(8)
-        expect(getPreviousSessionVisibleCount(8, 8)).toBe(8)
+        expect(getPreviousSessionVisibleCount(8, 8)).toBe(0)
+        expect(getPreviousSessionVisibleCount(3, 8)).toBe(0)
+        expect(getPreviousSessionVisibleCount(0, 8)).toBe(0)
     })
 
     it('uses a minimum batch size of one', () => {

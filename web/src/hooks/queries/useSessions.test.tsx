@@ -1,6 +1,6 @@
 import { createElement, type ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, renderHook } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
 import type { SessionsResponse, SessionSummary } from '@/types/api'
@@ -38,4 +38,45 @@ it('does not let a delayed REST snapshot undo newer user input from SSE', async 
     const data = client.getQueryData<SessionsResponse>(queryKeys.sessions)!
     expect(data.sessions.map(s => s.id)).toEqual(['a', 'b'])
     expect(data.sessions[0]!.lastUserMessageAt).toBe(300)
+})
+
+it('keeps cleared attention when an older GET arrives after the user has spoken', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let resolve!: (response: SessionsResponse) => void
+    const api = { getSessions: () => new Promise<SessionsResponse>(done => { resolve = done }) } as unknown as ApiClient
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client }, children)
+    const { result } = renderHook(() => useSessions(api, { enabled: false }), { wrapper })
+    await act(async () => {
+        const pending = result.current.refetch()
+        client.setQueryData(queryKeys.sessions, { sessions: [row('a', 2_000)] })
+        resolve({ sessions: [{ ...row('a', 500), pendingRequestsCount: 11, pendingRequestKinds: ['permission'],
+            pendingRequests: [{ id: 'old', kind: 'permission', tool: 'Bash', since: 1_000 }] }] })
+        await pending
+    })
+    await waitFor(() => expect(result.current.sessions[0]?.lastUserMessageAt).toBe(2_000))
+    expect(result.current.sessions[0]!.pendingRequestsCount).toBe(0)
+    expect(result.current.sessions[0]!.pendingRequestKinds).toEqual([])
+    expect(result.current.sessions[0]!.pendingRequests).toEqual([])
+})
+
+it('recovers crossed state and user-clock snapshots with one fresh GET', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let resolve!: (response: SessionsResponse) => void
+    const coherent = { ...row('a', 2_000), agentStateVersion: 3 }
+    const getSessions = vi.fn()
+        .mockImplementationOnce(() => new Promise<SessionsResponse>(done => { resolve = done }))
+        .mockResolvedValue({ sessions: [coherent] })
+    const api = { getSessions } as unknown as ApiClient
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client }, children)
+    const { result } = renderHook(() => useSessions(api), { wrapper })
+    await act(async () => {
+        client.setQueryData(queryKeys.sessions, { sessions: [{ ...row('a', 1_000), agentStateVersion: 3,
+            pendingRequestsCount: 1, pendingRequestKinds: ['permission'],
+            pendingRequests: [{ id: 'old', kind: 'permission', tool: 'Bash', since: 1_500 }] }] })
+        resolve({ sessions: [{ ...row('a', 2_000), agentStateVersion: 2 }] })
+    })
+    await waitFor(() => expect(getSessions).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.sessions[0]?.pendingRequestsCount).toBe(0))
+    expect(result.current.sessions[0]!.lastUserMessageAt).toBe(2_000)
+    expect(result.current.sessions[0]!.agentStateVersion).toBe(3)
 })

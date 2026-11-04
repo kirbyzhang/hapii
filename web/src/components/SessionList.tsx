@@ -410,14 +410,14 @@ export function filterUnreadSessionsOnly(
 }
 
 // Paginated session previews move one batch at a time in either direction.
-// Counts always stay within the configured preview floor and the group total.
+// Zero is the final collapsed view: connected sessions only.
 export function getNextSessionVisibleCount(current: number, step: number, total: number): number {
     return Math.min(current + Math.max(1, step), total)
 }
 
 export function getPreviousSessionVisibleCount(current: number, step: number): number {
     const normalizedStep = Math.max(1, step)
-    return Math.max(normalizedStep, current - normalizedStep)
+    return current <= normalizedStep ? 0 : Math.max(normalizedStep, current - normalizedStep)
 }
 
 // Group structure is unchanged; output and liveness never change its order.
@@ -673,11 +673,12 @@ export function getVisibleSessionPreview(
     } = {}
 ): SessionSummary[] {
     const limit = options.limit ?? GROUP_SESSION_PREVIEW_LIMIT
+    if (!options.expanded && limit === 0) return sessions.filter(session => session.active)
     if (options.expanded || sessions.length <= limit) return sessions
 
     const requiredIds = new Set<string>()
     for (const session of sessions) {
-        if (session.active && session.pendingRequestsCount > 0) requiredIds.add(session.id)
+        if (session.active) requiredIds.add(session.id)
     }
     if (options.selectedSessionId && sessions.some(session => session.id === options.selectedSessionId)) {
         requiredIds.add(options.selectedSessionId)
@@ -1765,6 +1766,24 @@ export function SessionList(props: {
         return sessionVisibleCounts.get(group.key) ?? sessionPreviewLimit
     }
 
+    const getPreviousGroupVisibleCount = (group: SessionGroup, current: number): number => {
+        const visibleCount = getVisibleSessionPreview(group.sessions, {
+            selectedSessionId,
+            limit: current
+        }).length
+        let previous = getPreviousSessionVisibleCount(current, sessionPreviewLimit)
+        // Connected/selected rows can fill several preview batches by themselves.
+        // Skip caps that would hide nothing so the final connected-only view
+        // remains reachable, even when a closed session is selected.
+        while (previous > 0 && getVisibleSessionPreview(group.sessions, {
+            selectedSessionId,
+            limit: previous
+        }).length >= visibleCount) {
+            previous = getPreviousSessionVisibleCount(previous, sessionPreviewLimit)
+        }
+        return previous
+    }
+
     const showMoreSessions = (group: SessionGroup) => {
         setSessionVisibleCounts(prev => {
             const next = new Map(prev)
@@ -1792,8 +1811,8 @@ export function SessionList(props: {
                 prev.get(group.key) ?? sessionPreviewLimit,
                 group.sessions.length
             )
-            const previous = getPreviousSessionVisibleCount(current, sessionPreviewLimit)
-            if (previous <= sessionPreviewLimit) {
+            const previous = getPreviousGroupVisibleCount(group, current)
+            if (previous === sessionPreviewLimit) {
                 next.delete(group.key)
             } else {
                 next.set(group.key, previous)
@@ -1944,7 +1963,7 @@ export function SessionList(props: {
             getGroupVisibleCount(group),
             group.sessions.length
         )
-        const previousLimit = getPreviousSessionVisibleCount(currentLimit, sessionPreviewLimit)
+        const previousLimit = getPreviousGroupVisibleCount(group, currentLimit)
         const previousGroupSessions = getVisibleSessionPreview(group.sessions, {
             selectedSessionId,
             limit: previousLimit
@@ -2016,7 +2035,7 @@ export function SessionList(props: {
                                 />
                             </div>
                         ))}
-                        {group.sessions.length > sessionPreviewLimit && (hiddenSessionCount > 0 || canShowFewerSessions) ? (
+                        {hiddenSessionCount > 0 || canShowFewerSessions ? (
                             <div className="ml-2.5 mr-2 my-1 flex gap-1.5">
                                 {canShowFewerSessions ? (
                                     <button

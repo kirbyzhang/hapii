@@ -2256,6 +2256,7 @@ function SessionChatInner(props: SessionChatProps) {
                         onResumeStoredDraft={() => handleSend('', undefined, null)}
                         thinking={props.session.thinking}
                         agentState={props.session.agentState}
+                        lastUserMessageAt={props.session.lastUserMessageAt}
                         backgroundTaskCount={props.session.backgroundTaskCount}
                         contextSize={reduced.latestUsage?.contextSize}
                         contextCacheRead={reduced.latestUsage?.cacheRead}

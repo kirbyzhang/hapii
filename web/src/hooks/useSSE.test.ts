@@ -4,6 +4,7 @@ import { createElement, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionSummary } from '@/types/api'
 import type { Session } from '@/types/api'
+import { toSessionSummary } from '@hapi/protocol'
 import { queryKeys } from '@/lib/query-keys'
 import {
     applySessionDetailPatch,
@@ -492,6 +493,100 @@ describe('useSSE user-activity ordering', () => {
         }))
         const data = queryClient.getQueryData<{ sessions: SessionSummary[] }>(queryKeys.sessions)
         expect(data?.sessions[0]?.lastUserMessageAt).toBe(9_000)
+        unmount()
+    })
+})
+
+describe('useSSE superseded request attention', () => {
+    beforeEach(() => {
+        vi.useFakeTimers()
+        FakeEventSource.instances = []
+        vi.stubGlobal('EventSource', FakeEventSource)
+    })
+    afterEach(() => {
+        vi.unstubAllGlobals()
+        vi.restoreAllMocks()
+        vi.useRealTimers()
+    })
+
+    function full(lastUserMessageAt: number, agentStateVersion = 1): Session {
+        const requests = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [
+            `old-${i}`, { tool: 'Bash', arguments: {}, createdAt: 1_000 + i }
+        ]))
+        return {
+            id: 'session-1', namespace: 'default', seq: 1, active: true, activeAt: 1_000,
+            createdAt: 1, updatedAt: 4_000, lastUserMessageAt, metadata: null,
+            metadataVersion: 0, agentStateVersion,
+            agentState: { requests: { ...requests, fresh: { tool: 'request_user_input', arguments: {}, createdAt: 3_000 } } },
+            thinking: false, thinkingAt: 0, model: null, modelReasoningEffort: null,
+            effort: null, serviceTier: null
+        }
+    }
+
+    function send(data: unknown) {
+        act(() => FakeEventSource.instances[0]?.simulateMessage({
+            type: 'session-updated', sessionId: 'session-1', data
+        }))
+    }
+
+    it('clears all old requests using the same-version full state, including beyond the tooltip cap', () => {
+        const { queryClient, unmount } = renderUseSSE()
+        const raw = full(500)
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [toSessionSummary(raw)] })
+        queryClient.setQueryData(queryKeys.session(raw.id), { session: raw })
+        const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+        const read = () => queryClient.getQueryData<{ sessions: SessionSummary[] }>(queryKeys.sessions)!.sessions[0]!
+        expect(read().pendingRequestsCount).toBe(12)
+        expect(read().pendingRequests.some(r => r.id === 'fresh')).toBe(false)
+
+        send({ lastUserMessageAt: 2_000, agentState: { version: 1, value: raw.agentState } })
+        expect(read().pendingRequestsCount).toBe(1)
+        expect(read().pendingRequestKinds).toEqual(['input'])
+        expect(read().pendingRequests.map(r => r.id)).toEqual(['fresh'])
+        act(() => vi.advanceTimersByTime(20))
+        expect(invalidate).not.toHaveBeenCalled()
+
+        const newerState = { requests: { ...raw.agentState!.requests,
+            permission: { tool: 'Edit', arguments: {}, createdAt: 4_000 } } }
+        send({ agentState: { version: 2, value: newerState } })
+        expect(read().pendingRequestsCount).toBe(2)
+        send({ lastUserMessageAt: 500, agentState: { version: 1, value: raw.agentState } })
+        expect(read().pendingRequestsCount).toBe(2)
+        expect(read().agentStateVersion).toBe(2)
+        expect(read().lastUserMessageAt).toBe(2_000)
+        unmount()
+    })
+
+    it('refetches instead of guessing from a capped summary when the clock snapshot has an older state version', () => {
+        const { queryClient, unmount } = renderUseSSE()
+        const raw = full(500, 3)
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [toSessionSummary(raw)] })
+        const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+        send({ lastUserMessageAt: 2_000, agentState: { version: 2, value: { requests: {} } } })
+        const read = () => queryClient.getQueryData<{ sessions: SessionSummary[] }>(queryKeys.sessions)!.sessions[0]!
+        expect(read().agentStateVersion).toBe(3)
+        expect(read().lastUserMessageAt).toBe(2_000)
+        expect(read().pendingRequestsCount).toBe(12)
+        act(() => vi.advanceTimersByTime(20))
+        expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.sessions })
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [toSessionSummary({ ...raw, lastUserMessageAt: 2_000 })] })
+        expect(read().pendingRequestsCount).toBe(1)
+        expect(read().pendingRequests[0]?.id).toBe('fresh')
+        unmount()
+    })
+
+    it('merges the newer clock and raw state before deriving a stale full-session event', () => {
+        const { queryClient, unmount } = renderUseSSE()
+        const current = full(2_000, 3)
+        queryClient.setQueryData(queryKeys.session(current.id), { session: current })
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [toSessionSummary(current)] })
+        send({ ...full(500, 1), agentState: { requests: { old: { tool: 'Bash', arguments: {}, createdAt: 1_000 } } } })
+        const detail = queryClient.getQueryData<{ session: Session }>(queryKeys.session(current.id))!.session
+        const summary = queryClient.getQueryData<{ sessions: SessionSummary[] }>(queryKeys.sessions)!.sessions[0]!
+        expect(detail.lastUserMessageAt).toBe(2_000)
+        expect(detail.agentStateVersion).toBe(3)
+        expect(summary.pendingRequests.map(r => r.id)).toEqual(['fresh'])
+        expect(summary.pendingRequestsCount).toBe(1)
         unmount()
     })
 })

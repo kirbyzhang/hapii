@@ -686,7 +686,13 @@ export class SessionCache {
             type: 'session-updated',
             sessionId,
             namespace: session.namespace,
-            data: { lastUserMessageAt: session.lastUserMessageAt } satisfies SessionPatch
+            // Summary clients need the full request set to recalculate counts;
+            // their capped tooltip slice may omit newer requests. This is a
+            // snapshot of the existing version, not an agent-state write.
+            data: {
+                lastUserMessageAt: session.lastUserMessageAt,
+                agentState: { version: session.agentStateVersion, value: session.agentState }
+            } satisfies SessionPatch
         })
     }
 

@@ -1,11 +1,39 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
+import type { AgentState } from '@hapi/protocol'
 import { I18nProvider } from '@/lib/i18n-context'
 import { StatusBar } from './StatusBar'
 
 describe('StatusBar context details popover', () => {
     beforeEach(() => {
         localStorage.clear()
+    })
+
+    it.each(['Bash', 'request_user_input'])('recomputes pending status for %s when only the user-message watermark advances', (tool) => {
+        const agentState: AgentState = {
+            requests: { old: { tool, arguments: {}, createdAt: 150 } }
+        }
+        const status = (lastUserMessageAt: number, state = agentState) => (
+            <I18nProvider>
+                <StatusBar active thinking={false} agentState={state} lastUserMessageAt={lastUserMessageAt} />
+            </I18nProvider>
+        )
+        const { rerender } = render(status(100))
+        expect(screen.getByText('permission required')).toBeInTheDocument()
+
+        rerender(status(200))
+        expect(screen.queryByText('permission required')).toBeNull()
+        expect(screen.getByText('online')).toBeInTheDocument()
+        expect(Object.keys(agentState.requests ?? {})).toEqual(['old'])
+
+        const newState: AgentState = {
+            requests: { ...agentState.requests, current: { tool, arguments: {}, createdAt: 201 } }
+        }
+        rerender(status(201, newState))
+        expect(screen.getByText('permission required')).toBeInTheDocument()
+        rerender(status(202, newState))
+        expect(screen.queryByText('permission required')).toBeNull()
+        expect(screen.getByText('online')).toBeInTheDocument()
     })
 
     it('keeps stable connection labels in English and offsets the whole left status', () => {

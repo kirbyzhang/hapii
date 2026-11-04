@@ -1,4 +1,5 @@
 import {
+    computePendingRequestsCount,
     getCodexCollaborationModeLabel,
     getCopilotAgentModeLabel,
     getPermissionModeLabel,
@@ -56,9 +57,10 @@ function getConnectionStatus(
     agentState: AgentState | null | undefined,
     voiceStatus: ConversationStatus | undefined,
     backgroundTaskCount: number,
-    t: (key: string) => string
+    t: (key: string) => string,
+    lastUserMessageAt?: number
 ): { text: string; color: string; dotColor: string; isPulsing: boolean } {
-    const hasPermissions = agentState?.requests && Object.keys(agentState.requests).length > 0
+    const hasPermissions = computePendingRequestsCount(agentState, lastUserMessageAt) > 0
 
     // Voice connecting takes priority
     if (voiceStatus === 'connecting') {
@@ -195,6 +197,7 @@ export function StatusBar(props: {
     active: boolean
     thinking: boolean
     agentState: AgentState | null | undefined
+    lastUserMessageAt?: number
     backgroundTaskCount?: number
     contextSize?: number
     contextCacheRead?: number
@@ -219,8 +222,8 @@ export function StatusBar(props: {
     const { t } = useTranslation()
     const { preferences: headerMetadata } = useSessionHeaderMetadata()
     const connectionStatus = useMemo(
-        () => getConnectionStatus(props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount ?? 0, t),
-        [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, t]
+        () => getConnectionStatus(props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount ?? 0, t, props.lastUserMessageAt),
+        [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, props.lastUserMessageAt, t]
     )
 
     const contextHeuristicModel = props.contextModel ?? props.model

@@ -26,6 +26,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { applyAgyCatalogAnnouncement } from '@/lib/agyCatalogAnnouncement'
 import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, markMessagesIndeterminate, markMessagesRequeued, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
 import { applySessionDetailPatch } from '@/lib/sessionPatch'
+import { mergeSessionSnapshot } from '@/lib/sessionSnapshot'
 
 // Pure patch-application rules live in @/lib/sessionPatch (React-free, shared
 // with the fixture generator); re-exported here so hook consumers and existing
@@ -470,6 +471,7 @@ export function useSSE(options: {
         }
 
         const upsertSessionSummary = (session: Session) => {
+            let needsRefetch = false
             queryClient.setQueryData<SessionsResponse | undefined>(queryKeys.sessions, (previous) => {
                 if (!previous) {
                     return previous
@@ -477,16 +479,24 @@ export function useSSE(options: {
 
                 const existingIndex = previous.sessions.findIndex((item) => item.id === session.id)
                 const existing = existingIndex >= 0 ? previous.sessions[existingIndex] : undefined
+                const lastUserMessageAt = session.lastUserMessageAt === undefined
+                    ? existing?.lastUserMessageAt
+                    : Math.max(existing?.lastUserMessageAt ?? 0, session.lastUserMessageAt)
+                const keepPending = existing !== undefined && existing.agentStateVersion > session.agentStateVersion
                 const summary = {
-                    ...toSessionSummary(session),
+                    ...toSessionSummary({ ...session, lastUserMessageAt }),
                     contentRevision: Math.max(existing?.contentRevision ?? 0, session.contentRevision ?? 0),
                     readState: mergeReadState(existing?.readState, session.readState),
-                    lastUserMessageAt: session.lastUserMessageAt === undefined
-                        ? existing?.lastUserMessageAt
-                        : Math.max(existing?.lastUserMessageAt ?? 0, session.lastUserMessageAt),
+                    ...(keepPending ? {
+                        pendingRequestsCount: existing.pendingRequestsCount,
+                        pendingRequestKinds: existing.pendingRequestKinds,
+                        pendingRequests: existing.pendingRequests,
+                        agentStateVersion: existing.agentStateVersion
+                    } : {}),
                     futureScheduledMessageCount: existing?.futureScheduledMessageCount ?? 0,
                     nextScheduledAt: existing?.nextScheduledAt ?? null
                 }
+                needsRefetch = keepPending && (lastUserMessageAt ?? 0) > (existing.lastUserMessageAt ?? 0)
                 const nextSessions = previous.sessions.slice()
                 if (existingIndex >= 0) {
                     nextSessions[existingIndex] = summary
@@ -496,10 +506,12 @@ export function useSSE(options: {
                 nextSessions.sort(compareSessionSummaries)
                 return { ...previous, sessions: nextSessions }
             })
+            if (needsRefetch) queueSessionListInvalidation()
         }
 
         const patchSessionSummary = (sessionId: string, patch: SessionPatch): boolean => {
             let patched = false
+            let needsRefetch = false
             queryClient.setQueryData<SessionsResponse | undefined>(queryKeys.sessions, (previous) => {
                 if (!previous) {
                     return previous
@@ -550,10 +562,14 @@ export function useSSE(options: {
                     nextSummary.todosUpdatedAt = patch.todos.version
                 }
                 if (patch.agentState !== undefined && patch.agentState.version >= current.agentStateVersion) {
-                    nextSummary.pendingRequestsCount = computePendingRequestsCount(patch.agentState.value)
-                    nextSummary.pendingRequestKinds = computePendingRequestKinds(patch.agentState.value)
-                    nextSummary.pendingRequests = computePendingRequests(patch.agentState.value, nextSummary.updatedAt)
+                    nextSummary.pendingRequestsCount = computePendingRequestsCount(patch.agentState.value, nextSummary.lastUserMessageAt)
+                    nextSummary.pendingRequestKinds = computePendingRequestKinds(patch.agentState.value, nextSummary.lastUserMessageAt)
+                    nextSummary.pendingRequests = computePendingRequests(patch.agentState.value, nextSummary.updatedAt, undefined, nextSummary.lastUserMessageAt)
                     nextSummary.agentStateVersion = patch.agentState.version
+                } else if ((nextSummary.lastUserMessageAt ?? 0) > (current.lastUserMessageAt ?? 0)) {
+                    // Never infer a full count from the five tooltip requests,
+                    // or replace a newer state with the clock patch's older one.
+                    needsRefetch = true
                 }
                 if (patch.metadata !== undefined && patch.metadata.version >= current.metadataVersion) {
                     nextSummary.metadata = toSessionSummaryMetadata(patch.metadata.value)
@@ -572,7 +588,7 @@ export function useSSE(options: {
                 nextSessions.sort(compareSessionSummaries)
                 return { ...previous, sessions: nextSessions }
             })
-            return patched
+            return patched && !needsRefetch
         }
 
         const patchSessionDetail = (sessionId: string, patch: SessionPatch): boolean => {
@@ -740,12 +756,10 @@ export function useSSE(options: {
                     clearMessageWindow(event.sessionId)
                 } else if (isSessionRecord(event.data) && event.data.id === event.sessionId) {
                     const incoming = event.data
-                    queryClient.setQueryData<SessionResponse>(queryKeys.session(event.sessionId), previous => ({ session: {
-                        ...incoming,
-                        contentRevision: Math.max(previous?.session.contentRevision ?? 0, incoming.contentRevision ?? 0),
-                        readState: mergeReadState(previous?.session.readState, incoming.readState)
-                    } }))
-                    upsertSessionSummary(event.data)
+                    const merged = queryClient.setQueryData<SessionResponse>(queryKeys.session(event.sessionId), previous => ({
+                        session: mergeSessionSnapshot(previous?.session, incoming)
+                    }))
+                    upsertSessionSummary(merged?.session ?? incoming)
                 } else {
                     const patch = getSessionPatch(event.data)
                     if (patch) {

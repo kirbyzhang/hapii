@@ -112,14 +112,19 @@ export type SessionSummary = {
 // Re-exported as a standalone derivation so SSE patch handlers can recompute
 // summary fields from a structured `agentState` patch without needing the
 // full Session in hand.
-export function computePendingRequestKinds(agentState: AgentState | null | undefined): PendingRequestKind[] {
-    const requests = agentState?.requests
-    if (!requests) {
-        return []
-    }
+function currentRequestEntries(agentState: AgentState | null | undefined, lastUserMessageAt?: number) {
+    const entries = Object.entries(agentState?.requests ?? {})
+    if (typeof lastUserMessageAt !== 'number' || !Number.isFinite(lastUserMessageAt)) return entries
+    // A later user message supersedes the old prompt for attention/counting.
+    // Missing request timestamps cannot establish that ordering; keep them.
+    return entries.filter(([, request]) => typeof request.createdAt !== 'number'
+        || !Number.isFinite(request.createdAt)
+        || request.createdAt >= lastUserMessageAt)
+}
 
+export function computePendingRequestKinds(agentState: AgentState | null | undefined, lastUserMessageAt?: number): PendingRequestKind[] {
     const kinds = new Set<PendingRequestKind>()
-    for (const request of Object.values(requests)) {
+    for (const [, request] of currentRequestEntries(agentState, lastUserMessageAt)) {
         kinds.add(classifyKind(request.tool))
     }
 
@@ -131,15 +136,11 @@ export function computePendingRequestKinds(agentState: AgentState | null | undef
 export function computePendingRequests(
     agentState: AgentState | null | undefined,
     fallbackSince: number,
-    cap: number = PENDING_REQUEST_SUMMARY_CAP
+    cap: number = PENDING_REQUEST_SUMMARY_CAP,
+    lastUserMessageAt?: number
 ): PendingRequest[] {
-    const requests = agentState?.requests
-    if (!requests) {
-        return []
-    }
-
     const items: PendingRequest[] = []
-    for (const [id, request] of Object.entries(requests)) {
+    for (const [id, request] of currentRequestEntries(agentState, lastUserMessageAt)) {
         items.push({
             id,
             kind: classifyKind(request.tool),
@@ -157,18 +158,18 @@ export function computePendingRequests(
 }
 
 export function getPendingRequestKinds(session: Session): PendingRequestKind[] {
-    return computePendingRequestKinds(session.agentState)
+    return computePendingRequestKinds(session.agentState, session.lastUserMessageAt)
 }
 
 export function getPendingRequests(
     session: Session,
     cap: number = PENDING_REQUEST_SUMMARY_CAP
 ): PendingRequest[] {
-    return computePendingRequests(session.agentState, session.updatedAt, cap)
+    return computePendingRequests(session.agentState, session.updatedAt, cap, session.lastUserMessageAt)
 }
 
-export function computePendingRequestsCount(agentState: AgentState | null | undefined): number {
-    return agentState?.requests ? Object.keys(agentState.requests).length : 0
+export function computePendingRequestsCount(agentState: AgentState | null | undefined, lastUserMessageAt?: number): number {
+    return currentRequestEntries(agentState, lastUserMessageAt).length
 }
 
 export function computeTodoProgress(todos: TodoItem[] | undefined): SessionSummary['todoProgress'] {
@@ -259,9 +260,9 @@ export function toSessionSummary(session: Session): SessionSummary {
         agentStateVersion: session.agentStateVersion,
         todosUpdatedAt: session.todosUpdatedAt ?? 0,
         todoProgress: computeTodoProgress(session.todos),
-        pendingRequestsCount: computePendingRequestsCount(session.agentState),
-        pendingRequestKinds: computePendingRequestKinds(session.agentState),
-        pendingRequests: computePendingRequests(session.agentState, session.updatedAt),
+        pendingRequestsCount: computePendingRequestsCount(session.agentState, session.lastUserMessageAt),
+        pendingRequestKinds: getPendingRequestKinds(session),
+        pendingRequests: getPendingRequests(session),
         backgroundTaskCount: session.backgroundTaskCount ?? 0,
         futureScheduledMessageCount: 0,
         nextScheduledAt: null,

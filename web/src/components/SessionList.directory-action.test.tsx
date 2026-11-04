@@ -1228,7 +1228,7 @@ describe('SessionList collapse behavior', () => {
         fireEvent.click(screen.getByTitle('/work/hapi'))
 
         expect(screen.getByRole('button', { name: 'Expand 2' })).toBeInTheDocument()
-        expect(screen.queryByRole('button', { name: 'Collapse 2' })).toBeNull()
+        expect(screen.getByRole('button', { name: 'Collapse 2' })).toBeInTheDocument()
 
         fireEvent.click(screen.getByRole('button', { name: 'Expand 2' }))
 
@@ -1252,8 +1252,49 @@ describe('SessionList collapse behavior', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Collapse 2' }))
 
         expect(screen.queryByRole('button', { name: /Task 3/ })).toBeNull()
-        expect(screen.queryByRole('button', { name: 'Collapse 2' })).toBeNull()
+        expect(screen.getByRole('button', { name: 'Collapse 2' })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Expand 2' })).toBeInTheDocument()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Collapse 2' }))
+        expect(screen.queryByRole('button', { name: /Task [1-6]/ })).toBeNull()
+        expect(screen.queryByRole('button', { name: /Collapse/ })).toBeNull()
+        fireEvent.click(screen.getByRole('button', { name: 'Expand 2' }))
+        expect(screen.getByRole('button', { name: /Task 1/ })).toBeInTheDocument()
+    })
+
+    it('collapses a small mixed group to connected rows and preserves that view through live updates', () => {
+        const sessions = [
+            makeSession({ id: 'running', active: true, thinking: true, metadata: { path: '/work/hapi', name: 'Running row' } }),
+            makeSession({ id: 'waiting', active: true, metadata: { path: '/work/hapi', name: 'Waiting row' } }),
+            makeSession({ id: 'closed-selected', metadata: { path: '/work/hapi', name: 'Closed selected row' } }),
+            makeSession({ id: 'closed', metadata: { path: '/work/hapi', name: 'Closed row' } }),
+        ]
+        const { rerender } = render(renderSessionList(sessions, 'closed-selected'))
+        expect(screen.getByRole('button', { name: /Closed selected row/ })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Closed row/ })).toBeInTheDocument()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Collapse 2' }))
+        expect(screen.getByRole('button', { name: /Running row/ })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Waiting row/ })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Closed/ })).toBeNull()
+
+        const updatedSessions = sessions.map(session => ({
+            ...session,
+            thinking: false,
+            active: session.id === 'running' || session.id === 'closed',
+            updatedAt: 500,
+        }))
+        rerender(renderSessionList(updatedSessions, 'closed-selected'))
+        const finishedRow = screen.getByRole('button', { name: /Running row/ })
+        expect(finishedRow.querySelector('svg.animate-spin-slow')).toBeNull()
+        expect(finishedRow).not.toHaveTextContent('Waiting for input')
+        expect(screen.getByRole('button', { name: /Closed row/ })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Waiting row/ })).toBeNull()
+        expect(screen.queryByRole('button', { name: /Closed selected row/ })).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Expand 2' }))
+        expect(screen.getByRole('button', { name: /Waiting row/ })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Closed selected row/ })).toHaveAttribute('aria-current', 'page')
     })
 
     it('does not offer a no-op collapse when required sessions exceed the preview limit', () => {
@@ -1285,6 +1326,31 @@ describe('SessionList collapse behavior', () => {
 
         expect(screen.queryByRole('button', { name: /Task 1/ })).toBeNull()
         expect(screen.queryByRole('button', { name: /Collapse/ })).toBeNull()
+    })
+
+    it('can collapse beyond an unchanged preview when many connected rows and a closed selection are required', () => {
+        const sessions = Array.from({ length: 20 }, (_, index) => makeSession({
+            id: `boundary-${index}`,
+            active: index < 13,
+            metadata: { path: '/work/hapi', name: `Boundary row ${index}` },
+        }))
+        render(renderSessionList(sessions, 'boundary-13'))
+        const rows = () => screen.getAllByRole('button', { name: /Boundary row/ })
+        expect(rows()).toHaveLength(14)
+        expect(screen.getByRole('button', { name: /Boundary row 13/ })).toHaveAttribute('aria-current', 'page')
+
+        fireEvent.click(screen.getByRole('button', { name: 'Expand 6' }))
+        expect(rows()).toHaveLength(20)
+        fireEvent.click(screen.getByRole('button', { name: 'Collapse 6' }))
+        expect(rows()).toHaveLength(14)
+        fireEvent.click(screen.getByRole('button', { name: 'Collapse 1' }))
+        expect(rows()).toHaveLength(13)
+        expect(screen.queryByRole('button', { name: /Boundary row 13/ })).toBeNull()
+        expect(screen.queryByRole('button', { name: /Collapse/ })).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Expand 7' }))
+        expect(rows()).toHaveLength(20)
+        expect(screen.getByRole('button', { name: /Boundary row 13/ })).toHaveAttribute('aria-current', 'page')
     })
 
     it('expands from the rendered count when required sessions exceed the preview limit', () => {

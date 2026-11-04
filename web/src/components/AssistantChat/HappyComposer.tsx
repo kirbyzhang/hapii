@@ -308,6 +308,7 @@ export function HappyComposer(props: {
     allowSendWhenInactive?: boolean
     thinking?: boolean
     agentState?: AgentState | null
+    lastUserMessageAt?: number
     backgroundTaskCount?: number
     contextSize?: number
     contextCacheRead?: number
@@ -430,6 +431,7 @@ export function HappyComposer(props: {
         allowSendWhenInactive = false,
         thinking = false,
         agentState,
+        lastUserMessageAt,
         backgroundTaskCount,
         contextSize,
         contextCacheRead,
@@ -2334,6 +2336,7 @@ export function HappyComposer(props: {
                         active={active}
                         thinking={thinking}
                         agentState={agentState}
+                        lastUserMessageAt={lastUserMessageAt}
                         backgroundTaskCount={backgroundTaskCount}
                         contextSize={contextSize}
                         contextCacheRead={contextCacheRead}

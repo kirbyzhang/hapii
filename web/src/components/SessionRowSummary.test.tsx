@@ -49,21 +49,25 @@ describe('SessionRowSummary background status', () => {
         localStorage.clear()
     })
 
-    it('marks running and background work on the presence badge, without spinners', () => {
+    it('shows green and blue spinners beside titles while quiet rows have no status chrome', () => {
         const background = renderSummary(false).container
-        const backgroundBadge = background.querySelector('[data-testid="session-presence"]')
-        expect(backgroundBadge).toHaveClass('bg-blue-400', 'animate-pulse')
-        expect(background.querySelector('svg.animate-spin-slow')).toBeNull()
+        expect(background.querySelector('svg.animate-spin-slow')).toHaveClass('text-blue-400')
+        expect(screen.getByTitle('Background demo').nextElementSibling).toBe(background.querySelector('svg.animate-spin-slow'))
+        expect(screen.queryByText('Background tasks running')).toBeNull()
+        expect(screen.queryByTestId('session-presence')).toBeNull()
         cleanup()
 
         const thinking = render(
             <I18nProvider>
-                <SessionRowSummary session={makeSummary({ thinking: true, backgroundTaskCount: 0 })} />
+                <SessionRowSummary session={makeSummary({ thinking: true, backgroundTaskCount: 0 })} showDetailedStatus={false} />
             </I18nProvider>
         ).container
-        expect(thinking.querySelector('[data-testid="session-presence"]'))
-            .toHaveClass('bg-[var(--app-badge-success-text)]', 'animate-pulse')
-        expect(screen.queryByText('Running', { exact: true })).not.toBeInTheDocument()
+        const title = screen.getByTitle('Background demo')
+        expect(thinking.querySelector('svg.animate-spin-slow')).toHaveClass('text-[var(--app-badge-success-text)]')
+        expect(title.nextElementSibling).toBe(thinking.querySelector('svg.animate-spin-slow'))
+        expect(title.previousElementSibling).toHaveClass('h-4', 'w-4')
+        expect(screen.queryByText('Running', { exact: true })).toBeNull()
+        expect(screen.queryByTestId('session-presence')).toBeNull()
         cleanup()
 
         const idle = render(
@@ -71,23 +75,95 @@ describe('SessionRowSummary background status', () => {
                 <SessionRowSummary session={makeSummary({ backgroundTaskCount: 0 })} />
             </I18nProvider>
         ).container
-        expect(idle.querySelector('[data-testid="session-presence"]')).not.toHaveClass('animate-pulse')
+        expect(idle.querySelector('[data-testid="session-presence"]')).toBeNull()
+        expect(idle.querySelector('svg.animate-spin-slow')).toBeNull()
+        expect(screen.queryByText('Waiting for input')).toBeNull()
+        expect(screen.queryByTestId('session-task-status')).toBeNull()
     })
 
-    it('does not dim disconnected rows or show them a presence badge', () => {
+    it('dims disconnected rows, greys their title, and hides live task status', () => {
         const { container } = render(
             <I18nProvider>
                 <SessionRowSummary session={makeSummary({ active: false, backgroundTaskCount: 0 })} />
             </I18nProvider>
         )
-        expect(container.querySelector('.opacity-50')).toBeNull()
+        expect(container.querySelector('.opacity-50')).not.toBeNull()
+        expect(screen.getByTitle('Background demo')).toHaveClass('text-[var(--app-hint)]')
         expect(container.querySelector('[data-testid="session-presence"]')).toBeNull()
+        expect(screen.queryByTestId('session-task-status')).toBeNull()
     })
 
-    it('shows a detailed background tooltip on the agent icon in Extended mode', () => {
-        renderSummary(true)
+    it.each([false, true])('keeps foreground work green even with background tasks, then clears the spinner when quiet or disconnected (detailed=%s)', (showDetailedStatus) => {
+        const row = (session: SessionSummary) => (
+            <I18nProvider>
+                <SessionRowSummary session={session} showDetailedStatus={showDetailedStatus} />
+            </I18nProvider>
+        )
+        const running = makeSummary({ thinking: true, backgroundTaskCount: 2 })
+        const { container, rerender } = render(row(running))
+        expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-[var(--app-badge-success-text)]')
+        expect(screen.queryByTestId('session-presence')).toBeNull()
+
+        rerender(row({ ...running, thinking: false, backgroundTaskCount: 0 }))
+        expect(screen.queryByTestId('session-task-status')).toBeNull()
+        expect(screen.queryByText('Waiting for input')).toBeNull()
+        expect(container.querySelector('svg.animate-spin-slow')).toBeNull()
+        expect(container.querySelector('.opacity-50')).toBeNull()
+        expect(screen.getByTitle('Background demo')).toHaveClass('font-normal', 'text-[var(--app-fg)]')
+
+        rerender(row({ ...running, active: false }))
+        expect(screen.queryByTestId('session-task-status')).toBeNull()
+        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(container.querySelector('svg.animate-spin-slow')).toBeNull()
+        expect(container.querySelector('.opacity-50')).not.toBeNull()
+    })
+
+    it.each(['permission', 'input'] as const)('prioritizes a pending %s request over running and background work', (kind) => {
+        const session = makeSummary({
+            thinking: true,
+            pendingRequestsCount: 1,
+            pendingRequestKinds: [kind],
+            pendingRequests: [{ id: 'request', kind, tool: 'Question', since: 0 }],
+        })
+        const row = (showDetailedStatus: boolean) => (
+            <I18nProvider>
+                <SessionRowSummary session={session} showDetailedStatus={showDetailedStatus} />
+            </I18nProvider>
+        )
+        const { container, rerender } = render(row(false))
+        const expectedLabel = kind === 'permission' ? 'Permission required' : 'Needs input'
+        expect(screen.getByLabelText('pending')).toBeInTheDocument()
+        expect(screen.getByText('pending')).toBeInTheDocument()
+        expect(container.querySelector('svg.animate-spin-slow')).toBeNull()
+
+        rerender(row(true))
+        expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent(expectedLabel)
+        expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('Question')
+        expect(container.querySelector('svg.animate-spin-slow')).toBeNull()
+    })
+
+    it('does not add persistent status text or a spinner to a keepalive-only idle row', () => {
+        const idle = makeSummary({
+            backgroundTaskCount: 0,
+            metadata: { path: '/demo', name: 'Idle session', lifecycleState: 'idle' },
+        })
+        const { container } = render(
+            <I18nProvider>
+                <SessionRowSummary session={idle} />
+            </I18nProvider>
+        )
+        expect(screen.queryByTestId('session-task-status')).toBeNull()
+        expect(screen.queryByText('Idle (keepalive only)')).toBeNull()
+        expect(screen.queryByText('Waiting for input')).toBeNull()
+        expect(container.querySelector('svg.animate-spin-slow')).toBeNull()
+        expect(screen.queryByTestId('session-presence')).toBeNull()
+    })
+
+    it('shows the detailed background tooltip on the blue spinner in Extended mode', () => {
+        const { container } = renderSummary(true)
 
         expect(screen.queryByText('Running', { exact: true })).not.toBeInTheDocument()
+        expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-blue-400')
         const tooltip = screen.getByRole('tooltip', { hidden: true })
         expect(tooltip).toHaveTextContent('Background tasks running')
         expect(tooltip).toHaveTextContent('2 tasks running')
@@ -164,7 +240,7 @@ describe('SessionRowSummary background status', () => {
         expectUnread()
     })
 
-    it('marks unread without a dot while the presence badge keeps pulsing', () => {
+    it('preserves the green working spinner beside an unread title without adding a dot', () => {
         const session = makeSummary({
             id: 'selected-thinking-unread',
             thinking: true,
@@ -185,10 +261,9 @@ describe('SessionRowSummary background status', () => {
         )
 
         expectUnread()
-        const dots = container.querySelectorAll('.rounded-full')
-        expect(dots).toHaveLength(1)
-        expect(dots[0]).toHaveAttribute('data-testid', 'session-presence')
-        expect(dots[0]).toHaveClass('animate-pulse')
+        expect(container.querySelectorAll('.rounded-full')).toHaveLength(0)
+        expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-[var(--app-badge-success-text)]')
+        expect(screen.queryByTestId('session-presence')).toBeNull()
     })
 
     it('shows unseen output from a running session', () => {
@@ -202,7 +277,8 @@ describe('SessionRowSummary background status', () => {
         )
 
         expectUnread()
-        expect(container.querySelector('[data-testid="session-presence"]')).toHaveClass('bg-blue-400', 'animate-pulse')
+        expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-blue-400')
+        expect(screen.queryByTestId('session-presence')).toBeNull()
     })
 
     it('shows pending requests as an amber symbol, not a dot', () => {
@@ -222,13 +298,13 @@ describe('SessionRowSummary background status', () => {
 
         expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('Bash')
         expect(container.querySelector('.text-\\[var\\(--app-badge-warning-text\\)\\] svg')).not.toBeNull()
-        expect(container.querySelectorAll('.rounded-full')).toHaveLength(1)
+        expect(container.querySelectorAll('.rounded-full')).toHaveLength(0)
     })
 })
 
 function expectUnread() {
     expect(screen.getByText('New activity')).toHaveClass('sr-only')
-    expect(screen.getByText(/demo|Background/, { selector: '[title]' })).toHaveClass('font-semibold')
+    expect(screen.getByTitle('Background demo')).toHaveClass('font-normal')
 }
 
 describe('SessionRowSummary time label', () => {

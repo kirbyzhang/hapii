@@ -242,6 +242,94 @@ describe('toSessionSummary', () => {
         const summary = toSessionSummary(makeSession({ agentState: null }))
         expect(summary.pendingRequests).toEqual([])
     })
+
+    it('counts only current requests after newer user input without modifying the raw request map', () => {
+        const session = makeSession({
+            lastUserMessageAt: 200,
+            updatedAt: 900,
+            agentState: {
+                requests: {
+                    oldPermission: { tool: 'Bash', arguments: {}, createdAt: 100 },
+                    oldQuestion: { tool: 'request_user_input', arguments: {}, createdAt: 150 },
+                    equalQuestion: { tool: 'AskUserQuestion', arguments: {}, createdAt: 200 },
+                    newPermission: { tool: 'Edit', arguments: {}, createdAt: 220 },
+                    newQuestion: { tool: 'request_user_input', arguments: {}, createdAt: 240 },
+                    undatedPermission: { tool: 'Bash', arguments: {} }
+                }
+            }
+        })
+        const rawState = structuredClone(session.agentState)
+        const summary = toSessionSummary(session)
+
+        expect(summary.pendingRequestsCount).toBe(4)
+        expect(summary.pendingRequestKinds).toEqual(['permission', 'input'])
+        expect(summary.pendingRequests.map(request => request.id)).toEqual([
+            'equalQuestion', 'newPermission', 'newQuestion', 'undatedPermission'
+        ])
+        expect(summary.pendingRequests.at(-1)?.since).toBe(900)
+        expect(getPendingRequestKinds(session)).toEqual(summary.pendingRequestKinds)
+        expect(getPendingRequests(session)).toEqual(summary.pendingRequests)
+        expect(session.agentState).toEqual(rawState)
+    })
+
+    it('clears the displayed count and kinds when all eleven unanswered questions predate user input', () => {
+        const requests = Object.fromEntries(Array.from({ length: 11 }, (_, index) => [
+            `old-question-${index}`,
+            { tool: 'request_user_input', arguments: {}, createdAt: index + 1 }
+        ]))
+        const session = makeSession({ lastUserMessageAt: 100, agentState: { requests } })
+        const summary = toSessionSummary(session)
+
+        expect(summary.pendingRequestsCount).toBe(0)
+        expect(summary.pendingRequestKinds).toEqual([])
+        expect(summary.pendingRequests).toEqual([])
+        expect(session.agentState?.requests).toEqual(requests)
+        expect(Object.keys(session.agentState?.requests ?? {})).toHaveLength(11)
+        expect(session.agentState?.completedRequests).toBeUndefined()
+    })
+
+    it('keeps equal-time requests and requests whose ordering cannot be determined', () => {
+        const session = makeSession({
+            lastUserMessageAt: 200,
+            agentState: {
+                requests: {
+                    oldPermission: { tool: 'Bash', arguments: {}, createdAt: 199 },
+                    equalQuestion: { tool: 'request_user_input', arguments: {}, createdAt: 200 },
+                    undatedQuestion: { tool: 'AskUserQuestion', arguments: {} },
+                    nullDateQuestion: { tool: 'ExitPlanMode', arguments: {}, createdAt: null }
+                }
+            }
+        })
+        const summary = toSessionSummary(session)
+
+        expect(summary.pendingRequestsCount).toBe(3)
+        expect(summary.pendingRequestKinds).toEqual(['input'])
+        expect(summary.pendingRequests.map(request => request.id)).toEqual([
+            'equalQuestion', 'nullDateQuestion', 'undatedQuestion'
+        ])
+        expect(getPendingRequestKinds(session)).toEqual(['input'])
+        expect(toSessionSummary({ ...session, lastUserMessageAt: undefined }).pendingRequestsCount).toBe(4)
+    })
+
+    it('filters superseded requests before capping the list while counting all current kinds', () => {
+        const requests: Record<string, { tool: string; arguments: unknown; createdAt: number }> = {}
+        for (let index = 0; index < PENDING_REQUEST_SUMMARY_CAP; index += 1) {
+            requests[`old-${index}`] = { tool: 'Bash', arguments: {}, createdAt: index }
+        }
+        for (let index = 0; index < PENDING_REQUEST_SUMMARY_CAP + 1; index += 1) {
+            requests[`current-${index}`] = { tool: 'request_user_input', arguments: {}, createdAt: 100 + index }
+        }
+        requests.latestPermission = { tool: 'Edit', arguments: {}, createdAt: 500 }
+        const summary = toSessionSummary(makeSession({ lastUserMessageAt: 100, agentState: { requests } }))
+
+        expect(summary.pendingRequestsCount).toBe(PENDING_REQUEST_SUMMARY_CAP + 2)
+        expect(summary.pendingRequestKinds).toEqual(['permission', 'input'])
+        expect(summary.pendingRequests).toHaveLength(PENDING_REQUEST_SUMMARY_CAP)
+        expect(summary.pendingRequests.map(request => request.id)).toEqual(
+            Array.from({ length: PENDING_REQUEST_SUMMARY_CAP }, (_, index) => `current-${index}`)
+        )
+        expect(summary.pendingRequests.every(request => request.kind === 'input')).toBe(true)
+    })
 })
 
 describe('getPendingRequests', () => {

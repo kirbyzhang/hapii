@@ -1,4 +1,4 @@
-import { mergeReadState } from '@hapi/protocol'
+import { mergeSessionSnapshot } from '@/lib/sessionSnapshot'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
 import type { Session } from '@/types/api'
@@ -37,10 +37,7 @@ export function useSession(api: ApiClient | null, sessionId: string | null): {
             }
             const response = await api.getSession(sessionId)
             const current = queryClient.getQueryData<{ session: Session }>(queryKeys.session(sessionId))?.session
-            return { ...response, session: { ...response.session,
-                contentRevision: Math.max(current?.contentRevision ?? 0, response.session.contentRevision ?? 0),
-                readState: mergeReadState(current?.readState, response.session.readState)
-            } }
+            return { ...response, session: mergeSessionSnapshot(current, response.session) }
         },
         enabled: Boolean(api && sessionId),
         staleTime: SESSION_DETAIL_STALE_TIME_MS,

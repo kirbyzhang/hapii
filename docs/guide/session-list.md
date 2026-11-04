@@ -81,10 +81,22 @@ matching rows.
 - **Active sessions only** hides inactive sessions but keeps the selected
   session visible.
 - **Session preview limit** controls how many rows are initially visible within
-  each project group. Sessions with pending requests and the selected session
-  can remain visible; a project can reveal more rows in batches.
+  each project group. Connected sessions and the selected session remain visible
+  even above the limit; a project can reveal more rows in batches. Collapsing
+  past the initial preview shows only connected sessions, including those waiting
+  for your next message. In this final collapsed view, closed sessions are hidden
+  even when selected. Expanding restores the preview in batches.
 - **Session-list status** controls whether rows show the standard or detailed
   attention/status presentation.
+
+Closed sessions use muted grey titles. Running tasks show a spinner beside the
+title in both status modes, with blue spinners for background-only work. Quiet
+connected sessions keep normal-colour titles without a persistent status label.
+Pending questions and permission requests retain their attention indicators.
+Only requests not superseded by a later user message count toward the list and
+chat status. Older requests remain in the conversation history; this display
+rule does not approve, deny, or delete them. Requests without a creation timestamp
+remain pending because their order relative to the user message is unknown.
 
 Empty, inactive session stubs without conversation, an agent identity, or an
 explicit title signal are not shown in the normal sidebar. Duplicate rows

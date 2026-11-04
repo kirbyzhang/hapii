@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { compareSessionSummaries, mergeReadState } from '@hapi/protocol'
+import { compareSessionSummaries } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import type { SessionsResponse, SessionSummary } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
+import { mergeSessionSummarySnapshot } from '@/lib/sessionSnapshot'
 
 export type UseSessionsOptions = {
     enabled?: boolean
@@ -26,17 +27,20 @@ export function useSessions(api: ApiClient | null, options: UseSessionsOptions =
             // Retain its monotonic ordering clock, not deleted rows or stale data.
             const current = queryClient.getQueryData<SessionsResponse>(queryKeys.sessions)
             const cached = new Map(current?.sessions.map(s => [s.id, s]))
-            return {
+            let needsRefetch = false
+            const result = {
                 ...response,
                 sessions: response.sessions.map(session => {
-                    const prior = cached.get(session.id)
-                    return { ...session,
-                        lastUserMessageAt: Math.max(prior?.lastUserMessageAt ?? 0, session.lastUserMessageAt ?? 0) || undefined,
-                        contentRevision: Math.max(prior?.contentRevision ?? 0, session.contentRevision ?? 0),
-                        readState: mergeReadState(prior?.readState, session.readState)
-                    }
+                    const merged = mergeSessionSummarySnapshot(cached.get(session.id), session)
+                    needsRefetch ||= merged.needsRefetch
+                    return merged.summary
                 }).sort(compareSessionSummaries)
             }
+            if (needsRefetch) {
+                // Let this GET settle before recovering a crossed SSE/REST snapshot.
+                setTimeout(() => { void queryClient.invalidateQueries({ queryKey: queryKeys.sessions }) }, 0)
+            }
+            return result
         },
         enabled: Boolean(api) && (options.enabled ?? true),
     })
