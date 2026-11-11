@@ -19,6 +19,31 @@ beforeEach(() => {
 afterEach(async () => { cleanup(); await vi.advanceTimersByTimeAsync(0); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('durable session read state', () => {
+    it('persists read and unread intents with distinct queue ids on insecure HTTP without randomUUID', () => {
+        const getRandomValues = vi.fn(crypto.getRandomValues.bind(crypto))
+        vi.stubGlobal('crypto', { getRandomValues })
+        try {
+            expect(() => markSessionSeen('s', 3)).not.toThrow()
+            expect(getSessionLastSeenAt('s')).toBe(3)
+            expect(getUnreadSessionCount([{ id: 's', contentRevision: 3 }])).toBe(0)
+            const storedRead = JSON.parse(localStorage.getItem('hapi.sessionReadState.v1:hub-a:alice')!).s.pending
+            expect(storedRead.request).toEqual({ type: 'read', readRevision: 3, expectedVersion: 0 })
+            expect(storedRead.id).toEqual(expect.any(String))
+            expect(storedRead.id.length).toBeGreaterThan(0)
+
+            expect(() => markSessionUnread('s')).not.toThrow()
+            expect(getSessionManualUnreadAt('s')).toBe(0)
+            const storedUnread = JSON.parse(localStorage.getItem('hapi.sessionReadState.v1:hub-a:alice')!).s.pending
+            expect(storedUnread.request).toEqual({ type: 'unread', expectedVersion: 0 })
+            expect(storedUnread.id).toEqual(expect.any(String))
+            expect(storedUnread.id.length).toBeGreaterThan(0)
+            expect(storedUnread.id).not.toBe(storedRead.id)
+            expect(getRandomValues).toHaveBeenCalledTimes(2)
+        } finally {
+            vi.unstubAllGlobals()
+        }
+    })
+
     it('reads persisted state once per synchronous pass instead of once per row', async () => {
         markSessionSeen('s', 2)
         await Promise.resolve()

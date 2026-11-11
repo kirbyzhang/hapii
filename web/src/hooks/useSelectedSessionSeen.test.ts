@@ -9,18 +9,89 @@ function setVisibility(state: DocumentVisibilityState): void {
 }
 function viewport(atBottom = true) {
     const element = document.createElement('div')
-    Object.defineProperty(element, 'clientHeight', { value: 100 })
-    Object.defineProperty(element, 'scrollHeight', { value: 200 })
+    Object.defineProperty(element, 'clientHeight', { configurable: true, value: 100 })
+    Object.defineProperty(element, 'scrollHeight', { configurable: true, value: 200 })
     element.scrollTop = atBottom ? 100 : 0
     return { current: element }
 }
 const content = { current: document.createElement('div') }
 const settle = () => act(async () => { await vi.advanceTimersByTimeAsync(100) })
 
-beforeEach(() => { vi.useFakeTimers(); localStorage.clear(); setVisibility('visible') })
-afterEach(() => { vi.useRealTimers(); setVisibility('visible') })
+class ObservedResize {
+    static instances: ObservedResize[] = []
+    readonly targets = new Set<Element>()
+    constructor(private readonly callback: ResizeObserverCallback) { ObservedResize.instances.push(this) }
+    observe(target: Element) { this.targets.add(target) }
+    unobserve(target: Element) { this.targets.delete(target) }
+    disconnect() { this.targets.clear() }
+    static trigger(target: Element) {
+        for (const observer of this.instances) {
+            if (observer.targets.has(target)) observer.callback([{ target } as ResizeObserverEntry], observer as unknown as ResizeObserver)
+        }
+    }
+}
+
+beforeEach(() => {
+    vi.useFakeTimers(); localStorage.clear(); setVisibility('visible')
+    ObservedResize.instances = []
+    vi.stubGlobal('ResizeObserver', ObservedResize)
+})
+afterEach(() => { vi.useRealTimers(); setVisibility('visible'); vi.unstubAllGlobals() })
 
 describe('rendered read receipt', () => {
+    it('acknowledges a tail exposed only by viewport growth and retains the receipt after leaving', async () => {
+        const view = viewport(false)
+        const head = { id: 's', contentRevision: 3 }
+        const { unmount } = renderHook(() => useSelectedSessionSeen('s', 3, 0, view, content))
+        await settle()
+        expect(getSessionLastSeenAt('s')).toBe(0)
+        expect(getUnreadSessionCount([head])).toBe(1)
+
+        Object.defineProperty(view.current, 'clientHeight', { configurable: true, value: 200 })
+        act(() => ObservedResize.trigger(view.current))
+        await settle()
+
+        expect(getSessionLastSeenAt('s')).toBe(3)
+        expect(getUnreadSessionCount([head])).toBe(0)
+        unmount()
+        expect(getUnreadSessionCount([head])).toBe(0)
+        expect(ObservedResize.instances.every(observer => observer.targets.size === 0)).toBe(true)
+    })
+
+    it('acknowledges a previously zero-height viewport becoming visible without a scroll', async () => {
+        const view = viewport(false)
+        Object.defineProperty(view.current, 'clientHeight', { configurable: true, value: 0 })
+        const { unmount } = renderHook(() => useSelectedSessionSeen('s', 3, 0, view, content))
+        await settle()
+        expect(getSessionLastSeenAt('s')).toBe(0)
+        Object.defineProperty(view.current, 'clientHeight', { configurable: true, value: 200 })
+        act(() => ObservedResize.trigger(view.current))
+        await settle()
+        expect(getSessionLastSeenAt('s')).toBe(3)
+        unmount()
+        expect(getUnreadSessionCount([{ id: 's', contentRevision: 3 }])).toBe(0)
+    })
+
+    it('updates tail following on content-only resize and restores unread after scrolling away', async () => {
+        const view = viewport(false)
+        const head = { id: 's', contentRevision: 4 }
+        const { unmount } = renderHook(() => useSelectedSessionSeen('s', 3, 0, view, content))
+        await settle()
+        expect(getUnreadSessionCount([head])).toBe(1)
+
+        Object.defineProperty(view.current, 'scrollHeight', { configurable: true, value: 100 })
+        act(() => ObservedResize.trigger(content.current))
+        await settle()
+        expect(getSessionLastSeenAt('s')).toBe(3)
+        expect(getUnreadSessionCount([head])).toBe(0)
+
+        Object.defineProperty(view.current, 'scrollHeight', { configurable: true, value: 200 })
+        act(() => view.current.dispatchEvent(new Event('scroll')))
+        expect(getUnreadSessionCount([head])).toBe(1)
+        unmount()
+        expect(getUnreadSessionCount([head])).toBe(1)
+    })
+
     it('waits for visible rendered tail and uses only its observed revision', async () => {
         setVisibility('hidden')
         const view = viewport()

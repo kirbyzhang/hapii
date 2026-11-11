@@ -26,10 +26,13 @@ export function useSelectedSessionSeen(
             if (atTail && !stopFollowing) stopFollowing = followSessionTail(sessionId)
             else if (!atTail && stopFollowing) { stopFollowing(); stopFollowing = undefined }
         }
+        const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
+        resize?.observe(viewport)
+        if (contentRef.current) resize?.observe(contentRef.current)
         viewport.addEventListener('scroll', update, { passive: true })
         update()
-        return () => { viewport.removeEventListener('scroll', update); stopFollowing?.() }
-    }, [followsTail, sessionId, viewportRef])
+        return () => { resize?.disconnect(); viewport.removeEventListener('scroll', update); stopFollowing?.() }
+    }, [followsTail, sessionId, viewportRef, contentRef])
     useEffect(() => {
         if (!visible || !sessionId || renderedRevision === undefined) return
         const viewport = viewportRef.current
@@ -53,6 +56,7 @@ export function useSelectedSessionSeen(
         const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(check)
         const mutations = new MutationObserver(check)
         resize?.observe(content)
+        resize?.observe(viewport)
         mutations.observe(content, { subtree: true, childList: true, characterData: true })
         viewport.addEventListener('scroll', check, { passive: true })
         check()
