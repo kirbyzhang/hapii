@@ -80,16 +80,18 @@ matching rows.
   chips under the toolbar on wide screens, a filter button in the toolbar on
   narrow ones. The selection is remembered locally in the browser and falls
   back to All when that machine is no longer available.
-- **Unread** sessions need no filter. A collapsed project still lists its
-  unread sessions under its header, and the preview limit never hides one.
-  The toolbar shows **Mark all as read** with the unread count while any
-  session is unread.
+- **Unread only** in Sort and filter narrows the list to unread sessions,
+  while keeping the selected session visible. It also applies to content search.
+- **Keep unread sessions visible** in Settings → Display is on by default.
+  When enabled, collapsed projects still list unread rows and preview limits
+  never hide them. Turning it off lets read and unread rows fold normally.
+  The toolbar shows **Mark all as read** while any session is unread.
 - **Session preview limit** controls how many rows are initially visible within
-  each project group. Connected, unread, and selected sessions remain visible
+  each project group. Connected and selected sessions remain visible
   even above the limit; a project can reveal more rows in batches. Collapsing
-  past the initial preview keeps only these required rows. Closed, unread
-  sessions remain visible in this smallest preview and under collapsed project
-  headers, matching the upstream unread-visibility rule.
+  past the initial preview keeps only these required rows, plus unread rows
+  when Keep unread sessions visible is enabled. Closed, unread sessions then
+  remain visible in the smallest preview and under collapsed project headers.
 - **Session-list status** controls whether rows show the standard or detailed
   attention/status presentation.
 
@@ -97,6 +99,9 @@ Closed sessions use muted grey titles. Running tasks show a spinner beside the
 title in both status modes, with blue spinners for background-only work. Quiet
 connected sessions keep normal-colour titles without a persistent status label.
 Pending questions and permission requests retain their attention indicators.
+The agent icon also carries the upstream working, background, waiting, or
+stopped badge. A running attached job keeps its badge and progress meter bright
+even when the agent has stopped and the title line is dimmed.
 Only requests not superseded by a later user message count toward the list and
 chat status. Older requests remain in the conversation history; this display
 rule does not approve, deny, or delete them. Requests without a creation timestamp

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import {
     getHapiBaseUrl,
     installHapiAuth,
@@ -6,6 +6,14 @@ import {
 } from './helpers/hapi-live'
 
 const liveEnabled = process.env.HAPI_LIVE === '1'
+
+async function dismissFueCallouts(page: Page) {
+    const buttons = page.locator('[data-fue-callout="true"]')
+        .getByRole('button', { name: 'Got it', exact: true })
+    for (const button of await buttons.all()) {
+        if (await button.isVisible()) await button.click()
+    }
+}
 
 test('content search opens the matching message instead of the session tail', async ({ page, request }) => {
     test.skip(!liveEnabled, 'Set HAPI_LIVE=1 to run against a real hub session')
@@ -67,6 +75,7 @@ test('content search opens the matching message instead of the session tail', as
         hasText: hit.match.snippet.slice(0, 20)
     }).first()
     await expect(row).toBeVisible({ timeout: 30_000 })
+    await dismissFueCallouts(page)
     await row.click()
 
     await expect.poll(() => new URL(page.url()).pathname).toBe(`/sessions/${hit.session.id}`)
@@ -363,6 +372,7 @@ test('content search loads and opens a matching message outside the initial late
         hasText: coldHit.match.snippet.slice(0, 20)
     }).first()
     await expect(row).toBeVisible({ timeout: 30_000 })
+    await dismissFueCallouts(page)
     await row.click()
 
     await expect.poll(() => new URL(page.url()).pathname).toBe(`/sessions/${coldHit.session.id}`)
@@ -457,10 +467,13 @@ test('content search can jump to the same historical message repeatedly', async 
         } else {
             await page.goBack({ waitUntil: 'domcontentloaded', timeout: 60_000 })
         }
-        const searchButton = page.getByRole('button', { name: /Search (sessions|message content)/ }).first()
-        await expect(searchButton).toBeVisible({ timeout: 30_000 })
-        await searchButton.click()
         const searchInput = page.getByRole('searchbox')
+        // The list restores its expanded search on back navigation.
+        if (!await searchInput.isVisible()) {
+            const searchButton = page.getByRole('button', { name: /Search (sessions|message content)/ }).first()
+            await expect(searchButton).toBeVisible({ timeout: 30_000 })
+            await searchButton.click()
+        }
         await expect(searchInput).toBeVisible()
         const scopeButton = page.getByTestId('session-list-search-scope')
         // Back navigation retains the previous search scope. Select Content
@@ -475,6 +488,7 @@ test('content search can jump to the same historical message repeatedly', async 
             hasText: coldHit!.match.snippet.slice(0, 20)
         }).first()
         await expect(row).toBeVisible({ timeout: 30_000 })
+        await dismissFueCallouts(page)
         await row.click()
 
         await expect.poll(() => new URL(page.url()).pathname)

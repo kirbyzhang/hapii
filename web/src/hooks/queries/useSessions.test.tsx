@@ -16,6 +16,7 @@ function row(id: string, at: number): SessionSummary {
         metadataVersion: 0, agentStateVersion: 0, todosUpdatedAt: 0,
         todoProgress: null, pendingRequestsCount: 0, pendingRequestKinds: [], pendingRequests: [],
         backgroundTaskCount: 0, futureScheduledMessageCount: 0, nextScheduledAt: null,
+        attachedJob: null, attachedJobUpdatedAt: 0,
         model: null, effort: null
     }
 }
@@ -79,4 +80,39 @@ it('recovers crossed state and user-clock snapshots with one fresh GET', async (
     await waitFor(() => expect(result.current.sessions[0]?.pendingRequestsCount).toBe(0))
     expect(result.current.sessions[0]!.lastUserMessageAt).toBe(2_000)
     expect(result.current.sessions[0]!.agentStateVersion).toBe(3)
+})
+
+it.each([false, true])('keeps newer attached-job state alongside a newer user clock through a delayed GET (cleared=%s)', async (cleared) => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const job = {
+        key: 'import', label: 'Long import', status: 'running' as const,
+        heartbeatAt: 5_000, startedAt: 1_000, updatedAt: 5_000,
+    }
+    let resolve!: (response: SessionsResponse) => void
+    const api = { getSessions: () => new Promise<SessionsResponse>(done => { resolve = done }) } as unknown as ApiClient
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client }, children)
+    const { result } = renderHook(() => useSessions(api, { enabled: false }), { wrapper })
+    await act(async () => {
+        const pending = result.current.refetch()
+        client.setQueryData(queryKeys.sessions, { sessions: [{
+            ...row('a', 2_000),
+            attachedJob: cleared ? null : job,
+            attachedJobUpdatedAt: 5_000,
+        }] })
+        resolve({ sessions: [{
+            ...row('a', 500),
+            pendingRequestsCount: 1,
+            pendingRequestKinds: ['input'],
+            pendingRequests: [{ id: 'old', kind: 'input', tool: 'request_user_input', since: 1_000 }],
+            attachedJob: cleared ? { ...job, updatedAt: 4_000, heartbeatAt: 4_000 } : null,
+            attachedJobUpdatedAt: 4_000,
+        }] })
+        await pending
+    })
+
+    await waitFor(() => expect(result.current.sessions[0]?.lastUserMessageAt).toBe(2_000))
+    expect(result.current.sessions[0]!.pendingRequestsCount).toBe(0)
+    expect(result.current.sessions[0]!.pendingRequests).toEqual([])
+    expect(result.current.sessions[0]!.attachedJob).toEqual(cleared ? null : job)
+    expect(result.current.sessions[0]!.attachedJobUpdatedAt).toBe(5_000)
 })

@@ -26,6 +26,8 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
         backgroundTaskCount: 2,
         futureScheduledMessageCount: 0,
         nextScheduledAt: null,
+        attachedJob: null,
+        attachedJobUpdatedAt: 0,
         model: null,
         effort: null,
         contentRevision: overrides.updatedAt ?? 0,
@@ -49,12 +51,13 @@ describe('SessionRowSummary background status', () => {
         localStorage.clear()
     })
 
-    it('shows green and blue spinners beside titles while quiet rows have no status chrome', () => {
+    it('keeps compact foreground/background spinners alongside the official presence states', () => {
         const background = renderSummary(false).container
         expect(background.querySelector('svg.animate-spin-slow')).toHaveClass('text-blue-400')
         expect(screen.getByTitle('Background demo').nextElementSibling).toBe(background.querySelector('svg.animate-spin-slow'))
         expect(screen.queryByText('Background tasks running')).toBeNull()
-        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(screen.getByTestId('session-presence')).toHaveAttribute('data-presence', 'background')
+        expect(screen.getByTestId('session-presence')).toHaveClass('bg-blue-400', 'animate-pulse')
         cleanup()
 
         const thinking = render(
@@ -62,12 +65,13 @@ describe('SessionRowSummary background status', () => {
                 <SessionRowSummary session={makeSummary({ thinking: true, backgroundTaskCount: 0 })} showDetailedStatus={false} />
             </I18nProvider>
         ).container
-        const title = screen.getByTitle('Background demo')
         expect(thinking.querySelector('svg.animate-spin-slow')).toHaveClass('text-[var(--app-badge-success-text)]')
-        expect(title.nextElementSibling).toBe(thinking.querySelector('svg.animate-spin-slow'))
-        expect(title.previousElementSibling).toHaveClass('h-4', 'w-4')
-        expect(screen.queryByText('Running', { exact: true })).toBeNull()
-        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(screen.getByTitle('Background demo').nextElementSibling).toBe(thinking.querySelector('svg.animate-spin-slow'))
+        expect(thinking.querySelector('[data-testid="session-presence"]')?.parentElement).toHaveClass('h-4', 'w-4')
+        expect(thinking.querySelector('[data-testid="session-presence"]'))
+            .toHaveClass('bg-[var(--app-badge-success-text)]', 'animate-pulse')
+        expect(thinking.querySelector('[data-testid="session-presence"]')).toHaveAttribute('data-presence', 'working')
+        expect(screen.queryByText('Running', { exact: true })).not.toBeInTheDocument()
         cleanup()
 
         const idle = render(
@@ -75,22 +79,42 @@ describe('SessionRowSummary background status', () => {
                 <SessionRowSummary session={makeSummary({ backgroundTaskCount: 0 })} />
             </I18nProvider>
         ).container
-        expect(idle.querySelector('[data-testid="session-presence"]')).toBeNull()
+        const idleBadge = idle.querySelector('[data-testid="session-presence"]')
+        expect(idleBadge).toHaveAttribute('data-presence', 'waiting')
+        expect(idleBadge).not.toHaveClass('animate-pulse')
+        expect(idleBadge).toHaveClass('border-2', 'border-[var(--app-badge-success-text)]')
+        expect(idleBadge).not.toHaveClass('bg-[var(--app-badge-success-text)]')
         expect(idle.querySelector('svg.animate-spin-slow')).toBeNull()
         expect(screen.queryByText('Waiting for input')).toBeNull()
         expect(screen.queryByTestId('session-task-status')).toBeNull()
     })
 
-    it('dims disconnected rows, greys their title, and hides live task status', () => {
+    it('dims disconnected rows and gives them a stopped badge instead of nothing', () => {
         const { container } = render(
             <I18nProvider>
                 <SessionRowSummary session={makeSummary({ active: false, backgroundTaskCount: 0 })} />
             </I18nProvider>
         )
-        expect(container.querySelector('.opacity-50')).not.toBeNull()
-        expect(screen.getByTitle('Background demo')).toHaveClass('text-[var(--app-hint)]')
-        expect(container.querySelector('[data-testid="session-presence"]')).toBeNull()
-        expect(screen.queryByTestId('session-task-status')).toBeNull()
+        // Two scales of the same fact: the badge names the state on inspection,
+        // the row fade makes it legible while scanning a long list.
+        const faded = container.querySelector('.opacity-50')
+        expect(faded).not.toBeNull()
+        const badge = container.querySelector('[data-testid="session-presence"]')
+        expect(badge).toHaveAttribute('data-presence', 'stopped')
+        expect(badge).not.toHaveClass('animate-pulse')
+        expect(badge?.querySelector('svg')).not.toBeNull()
+        // The mark must not be dimmed along with the title line.
+        expect(faded!.contains(badge)).toBe(false)
+        expect(screen.getByTitle('Background demo')).toHaveClass('font-normal', 'text-[var(--app-hint)]')
+    })
+
+    it('keeps resident rows at full strength', () => {
+        const { container } = render(
+            <I18nProvider>
+                <SessionRowSummary session={makeSummary({ active: true, backgroundTaskCount: 0 })} />
+            </I18nProvider>
+        )
+        expect(container.querySelector('.opacity-50')).toBeNull()
     })
 
     it('keeps content-search snippets and truncation warnings alongside the compact working row', () => {
@@ -114,7 +138,7 @@ describe('SessionRowSummary background status', () => {
         expect(screen.getByText('just now')).toHaveClass('text-[var(--app-hint)]')
         expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-[var(--app-badge-success-text)]')
         expect(screen.queryByText('/demo/status')).toBeNull()
-        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(screen.getByTestId('session-presence')).toHaveAttribute('data-presence', 'working')
     })
 
     it.each([false, true])('keeps foreground work green even with background tasks, then clears the spinner when quiet or disconnected (detailed=%s)', (showDetailedStatus) => {
@@ -126,18 +150,19 @@ describe('SessionRowSummary background status', () => {
         const running = makeSummary({ thinking: true, backgroundTaskCount: 2 })
         const { container, rerender } = render(row(running))
         expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-[var(--app-badge-success-text)]')
-        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(screen.getByTestId('session-presence')).toHaveAttribute('data-presence', 'working')
 
         rerender(row({ ...running, thinking: false, backgroundTaskCount: 0 }))
         expect(screen.queryByTestId('session-task-status')).toBeNull()
         expect(screen.queryByText('Waiting for input')).toBeNull()
         expect(container.querySelector('svg.animate-spin-slow')).toBeNull()
         expect(container.querySelector('.opacity-50')).toBeNull()
+        expect(screen.getByTestId('session-presence')).toHaveAttribute('data-presence', 'waiting')
         expect(screen.getByTitle('Background demo')).toHaveClass('font-normal', 'text-[var(--app-fg)]')
 
         rerender(row({ ...running, active: false }))
         expect(screen.queryByTestId('session-task-status')).toBeNull()
-        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(screen.getByTestId('session-presence')).toHaveAttribute('data-presence', 'stopped')
         expect(container.querySelector('svg.animate-spin-slow')).toBeNull()
         expect(container.querySelector('.opacity-50')).not.toBeNull()
     })
@@ -180,10 +205,10 @@ describe('SessionRowSummary background status', () => {
         expect(screen.queryByText('Idle (keepalive only)')).toBeNull()
         expect(screen.queryByText('Waiting for input')).toBeNull()
         expect(container.querySelector('svg.animate-spin-slow')).toBeNull()
-        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(screen.getByTestId('session-presence')).toHaveAttribute('data-presence', 'waiting')
     })
 
-    it('shows the detailed background tooltip on the blue spinner in Extended mode', () => {
+    it('preserves the background tooltip on the compact agent icon in Extended mode', () => {
         const { container } = renderSummary(true)
 
         expect(screen.queryByText('Running', { exact: true })).not.toBeInTheDocument()
@@ -264,7 +289,7 @@ describe('SessionRowSummary background status', () => {
         expectUnread()
     })
 
-    it('preserves the green working spinner beside an unread title without adding a dot', () => {
+    it('shows the unread dot separately from the pulsing presence badge', () => {
         const session = makeSummary({
             id: 'selected-thinking-unread',
             thinking: true,
@@ -285,9 +310,11 @@ describe('SessionRowSummary background status', () => {
         )
 
         expectUnread()
-        expect(container.querySelectorAll('.rounded-full')).toHaveLength(0)
+        const dots = container.querySelectorAll('.rounded-full')
+        expect(dots).toHaveLength(2)
         expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-[var(--app-badge-success-text)]')
-        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(container.querySelector('[data-testid="session-unread"]')).toBeInTheDocument()
+        expect(container.querySelector('[data-testid="session-presence"]')).toHaveClass('animate-pulse')
     })
 
     it('shows unseen output from a running session', () => {
@@ -302,7 +329,16 @@ describe('SessionRowSummary background status', () => {
 
         expectUnread()
         expect(container.querySelector('svg.animate-spin-slow')).toHaveClass('text-blue-400')
-        expect(screen.queryByTestId('session-presence')).toBeNull()
+        expect(screen.getByTestId('session-presence')).toHaveAttribute('data-presence', 'background')
+    })
+
+    it('shows and clears the unread dot in standard session rows', () => {
+        const session = makeSummary({ id: 'standard-unread', backgroundTaskCount: 0, contentRevision: 5 })
+        const view = render(<I18nProvider><SessionRowSummary session={session} showDetailedStatus={false} lastSeenVersion={0} /></I18nProvider>)
+        expect(screen.getByTestId('session-unread')).toBeInTheDocument()
+        markSessionSeen(session.id, 5)
+        view.rerender(<I18nProvider><SessionRowSummary session={session} showDetailedStatus={false} lastSeenVersion={1} /></I18nProvider>)
+        expect(screen.queryByTestId('session-unread')).toBeNull()
     })
 
     it('shows pending requests as an amber symbol, not a dot', () => {
@@ -322,7 +358,7 @@ describe('SessionRowSummary background status', () => {
 
         expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('Bash')
         expect(container.querySelector('.text-\\[var\\(--app-badge-warning-text\\)\\] svg')).not.toBeNull()
-        expect(container.querySelectorAll('.rounded-full')).toHaveLength(0)
+        expect(container.querySelectorAll('.rounded-full')).toHaveLength(1)
     })
 
     it('marks a content-search snippet whose source message was truncated', () => {
@@ -338,6 +374,152 @@ describe('SessionRowSummary background status', () => {
 
         expect(screen.getByLabelText('This message was truncated for search; some content may be missing.'))
             .toBeInTheDocument()
+    })
+})
+
+describe('SessionRowSummary attached job progress', () => {
+    beforeEach(() => {
+        localStorage.clear()
+        vi.useFakeTimers()
+        vi.setSystemTime(1_000_000)
+    })
+
+    afterEach(() => {
+        vi.useRealTimers()
+    })
+
+    it('fades the row but keeps a pulsing working badge and job meter after the agent stops', () => {
+        const { container } = render(
+            <I18nProvider>
+                <SessionRowSummary
+                    session={makeSummary({
+                        active: false,
+                        backgroundTaskCount: 0,
+                        attachedJob: {
+                            key: 'import',
+                            label: 'beets import',
+                            status: 'running',
+                            remaining: 3_600,
+                            total: 172_800,
+                            unit: 's',
+                            heartbeatAt: 1_000_000,
+                            startedAt: 1_000_000 - 60_000,
+                            updatedAt: 1_000_000,
+                        },
+                        attachedJobUpdatedAt: 1,
+                    })}
+                />
+            </I18nProvider>
+        )
+
+        // A job outliving its agent is the case where the two signals must say
+        // different things at once: nothing holds this session in memory, and
+        // the work is still running.
+        const badge = container.querySelector('[data-testid="session-presence"]')
+        expect(badge).toHaveAttribute('data-presence', 'working')
+        expect(badge).toHaveClass('animate-pulse')
+
+        const faded = container.querySelector('.opacity-50')
+        expect(faded).not.toBeNull()
+        // The job's own affordances stay outside the faded subtree.
+        const jobLabel = screen.getByText('beets import')
+        expect(faded!.contains(jobLabel)).toBe(false)
+        expect(screen.getByTestId('attached-job-progress-bar')).toBeInTheDocument()
+        expect(faded!.contains(badge)).toBe(false)
+    })
+
+    it('renders a subtle indeterminate striped bar (no %) when fraction is unknown', () => {
+        const { container } = render(
+            <I18nProvider>
+                <SessionRowSummary
+                    session={makeSummary({
+                        backgroundTaskCount: 0,
+                        attachedJob: {
+                            key: 'countdown',
+                            label: 'dogfood countdown',
+                            status: 'running',
+                            remaining: 172_800,
+                            unit: 's',
+                            heartbeatAt: 1_000_000,
+                            startedAt: 1_000_000 - 60_000,
+                            updatedAt: 1_000_000,
+                        },
+                        attachedJobUpdatedAt: 1,
+                    })}
+                />
+            </I18nProvider>
+        )
+
+        expect(screen.getByText(/172800 s left/)).toBeInTheDocument()
+        const bar = screen.getByTestId('attached-job-progress-bar')
+        expect(bar).toHaveAttribute('data-progress', 'indeterminate')
+        expect(bar).toHaveAttribute('role', 'progressbar')
+        expect(bar).not.toHaveAttribute('aria-valuenow')
+        // Soft drifting stripes on a track — not spinner-only, not empty, not fake inline %, not loud chunk marquee.
+        expect(bar.querySelector('.animate-attached-job-indeterminate')).not.toBeNull()
+        expect(bar.querySelector('.animate-attached-job-marquee')).toBeNull()
+        expect(container.querySelector('[class*="w-1/3"]')).toBeNull()
+        expect(container.querySelector('[style*="width"]')).toBeNull()
+    })
+
+    it('renders label-only unknown jobs with striped indeterminate bar + running · elapsed (shape B)', () => {
+        render(
+            <I18nProvider>
+                <SessionRowSummary
+                    session={makeSummary({
+                        backgroundTaskCount: 0,
+                        attachedJob: {
+                            key: 'beets',
+                            label: 'beets import',
+                            status: 'running',
+                            detail: 'phase: match',
+                            heartbeatAt: 1_000_000,
+                            startedAt: 1_000_000 - 120_000,
+                            updatedAt: 1_000_000,
+                        },
+                        attachedJobUpdatedAt: 1,
+                    })}
+                />
+            </I18nProvider>
+        )
+
+        expect(screen.getByText(/running · 2m/)).toBeInTheDocument()
+        const bar = screen.getByTestId('attached-job-progress-bar')
+        expect(bar).toHaveAttribute('data-progress', 'indeterminate')
+        expect(bar.querySelector('.animate-attached-job-indeterminate')).not.toBeNull()
+        expect(bar).not.toHaveAttribute('aria-valuenow')
+    })
+
+    it('renders a real fill only when total yields a fraction', () => {
+        const { container } = render(
+            <I18nProvider>
+                <SessionRowSummary
+                    session={makeSummary({
+                        backgroundTaskCount: 0,
+                        attachedJob: {
+                            key: 'countdown',
+                            label: 'dogfood countdown',
+                            status: 'running',
+                            remaining: 86_400,
+                            total: 172_800,
+                            unit: 's',
+                            heartbeatAt: 1_000_000,
+                            startedAt: 1_000_000 - 60_000,
+                            updatedAt: 1_000_000,
+                        },
+                        attachedJobUpdatedAt: 1,
+                    })}
+                />
+            </I18nProvider>
+        )
+
+        const bar = screen.getByTestId('attached-job-progress-bar')
+        expect(bar).toHaveAttribute('data-progress', 'determinate')
+        expect(bar).toHaveAttribute('aria-valuenow', '50')
+        const fill = container.querySelector('[style*="width"]') as HTMLElement | null
+        expect(fill).not.toBeNull()
+        expect(fill!.style.width).toBe('50%')
+        expect(bar.querySelector('.animate-attached-job-indeterminate')).toBeNull()
     })
 })
 

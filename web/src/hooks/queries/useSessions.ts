@@ -4,6 +4,7 @@ import type { ApiClient } from '@/api/client'
 import type { SessionsResponse, SessionSummary } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 import { mergeSessionSummarySnapshot } from '@/lib/sessionSnapshot'
+import { reconcileAttachedJobsFromCache } from './reconcileAttachedJobs'
 
 export type UseSessionsOptions = {
     enabled?: boolean
@@ -28,7 +29,7 @@ export function useSessions(api: ApiClient | null, options: UseSessionsOptions =
             const current = queryClient.getQueryData<SessionsResponse>(queryKeys.sessions)
             const cached = new Map(current?.sessions.map(s => [s.id, s]))
             let needsRefetch = false
-            const result = {
+            const result: SessionsResponse = {
                 ...response,
                 sessions: response.sessions.map(session => {
                     const merged = mergeSessionSummarySnapshot(cached.get(session.id), session)
@@ -40,7 +41,7 @@ export function useSessions(api: ApiClient | null, options: UseSessionsOptions =
                 // Let this GET settle before recovering a crossed SSE/REST snapshot.
                 setTimeout(() => { void queryClient.invalidateQueries({ queryKey: queryKeys.sessions }) }, 0)
             }
-            return result
+            return reconcileAttachedJobsFromCache(result, current)
         },
         enabled: Boolean(api) && (options.enabled ?? true),
     })
