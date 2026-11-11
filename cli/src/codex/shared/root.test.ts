@@ -154,6 +154,33 @@ describe('async question delivery', () => {
     const item = { type: 'agentMessage', id: 'async_call', delivery: 'async', text: 'Which client?',
         questions: [{ title: 'Which client?', options: ['Web', 'Terminal'] }] };
 
+    it.each(['completed', 'inProgress'])('answers a child question using only its latest turn status (%s)', async status => {
+        const f = await fixture(); await f.root.activate();
+        const original = f.root.client.request.bind(f.root.client);
+        const request = vi.spyOn(f.root.client, 'request').mockImplementation(async (method, params) => {
+            if (method === 'thread/read' && (params as Record<string, unknown>)?.threadId === 'child') {
+                return { thread: { id: 'child', parentThreadId: 'thread', turns: [
+                    { id: 'orphan', status: 'inProgress', items: [] },
+                    { id: 'latest', status, items: [item] },
+                ] } };
+            }
+            if (method === 'turn/start' || method === 'turn/steer') return {};
+            return original(method, params);
+        });
+        try {
+            f.native.notify('item/completed', { threadId: 'child', turnId: 'latest', item });
+            await f.drain();
+            const q = asyncQuestionsForItem('child', item)[0];
+            expect(f.state().requests![q.id]).toBeDefined();
+            await f.rpc.get(RPC_METHODS.Permission)!({ id: q.id, approved: true, answers: { [q.questionItemId]: ['Web'] } });
+            const deliveries = request.mock.calls.filter(([method]) => method === 'turn/start' || method === 'turn/steer');
+            expect(deliveries).toEqual([[status === 'inProgress' ? 'turn/steer' : 'turn/start', expect.objectContaining({
+                threadId: 'child', ...(status === 'inProgress' ? { expectedTurnId: 'latest' } : {}),
+            })]]);
+            if (status === 'completed') expect(deliveries[0][1]).not.toHaveProperty('expectedTurnId');
+        } finally { request.mockRestore(); }
+    });
+
     it.each([false, true])('routes question answers through native user input (active: %s)', async active => {
         const f = await fixture(); await f.root.activate();
         if (active) f.native.notify('turn/started', { threadId: 'thread', turn: { id: 'turn', status: 'inProgress' } });
@@ -637,6 +664,39 @@ describe('shared plan actions', () => {
 });
 
 describe('shared steering availability', () => {
+    it.each(['completed', 'failed', 'interrupted'])('refresh treats a latest %s turn as idle despite an orphaned inProgress turn', async status => {
+        const f = await fixture();
+        const heartbeat = vi.spyOn(f.root.session, 'keepAlive');
+        f.native.thread.turns = [
+            { id: 'orphan', status: 'inProgress', items: [] },
+            { id: 'latest', status, items: [] },
+        ];
+        await f.root.refresh();
+        expect(heartbeat).toHaveBeenLastCalledWith(false, undefined, expect.anything());
+        expect(f.state().steeringActive).toBe(false);
+    });
+
+    it.each([false, true])('refresh tracks the newest active turn so its completion clears busy state despite an orphan (stale notification: %s)', async staleNotification => {
+        const f = await fixture();
+        const heartbeat = vi.spyOn(f.root.session, 'keepAlive');
+        f.native.thread.turns = [
+            { id: 'orphan', status: 'inProgress', items: [] },
+            { id: 'latest', status: 'inProgress', items: [] },
+        ];
+        await f.root.refresh();
+        expect(heartbeat).toHaveBeenLastCalledWith(true, undefined, expect.anything());
+        expect(f.state().steeringActive).toBe(true);
+        if (staleNotification) {
+            f.native.notify('turn/completed', { threadId: 'thread', turn: { id: 'orphan', status: 'completed' } });
+            await f.drain();
+            expect(f.state().steeringActive).toBe(true);
+        }
+        f.native.notify('turn/completed', { threadId: 'thread', turn: { id: 'latest', status: 'completed' } });
+        await f.drain();
+        expect(f.state().steeringActive).toBe(false);
+        expect(heartbeat).toHaveBeenLastCalledWith(false, undefined, expect.anything());
+    });
+
     it.each([false, true])('waits for enqueue and pins the requested turn (turn changes: %s)', async changes => {
         const f = await fixture();
         await f.root.activate();

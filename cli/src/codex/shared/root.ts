@@ -26,6 +26,14 @@ import { inheritedSandbox, settingsMatch } from './settings';
 import { planImplementationMessageId, planProposalForItem, planProposalForTurn } from './plan';
 
 type RuntimeSettings = NonNullable<Parameters<ApiSessionClient['keepAlive']>[2]>;
+
+/** Native history is chronological; only its tail can be the active turn.
+ * Earlier turns may retain inProgress after an interrupted native lifecycle. */
+function latestActiveTurnId(turns: unknown): string | undefined {
+    const latest = Array.isArray(turns) ? record(turns.at(-1)) : {};
+    return latest.status === 'inProgress' ? string(latest.id) : undefined;
+}
+
 export type RootHost = {
     directory: string; generation: string; endpoint: string; token?: string;
     settingsFor(threadId: string): Record<string, unknown> | undefined;
@@ -175,7 +183,7 @@ export class SharedCodexRoot {
         const operation = (async () => {
             const thread = threadId === this.threadId ? undefined : await this.readThread(threadId);
             const turnId = threadId === this.threadId ? this.currentTurn
-                : string((Array.isArray(thread?.turns) ? thread.turns.map(record) : []).find(turn => turn.status === 'inProgress')?.id);
+                : latestActiveTurnId(thread?.turns);
             const params = { threadId, clientUserMessageId, input: buildUserInputFromMessage(text) };
             await this.client.request(turnId ? 'turn/steer' : 'turn/start', { ...params, ...(turnId ? { expectedTurnId: turnId } : {}) });
         })();
@@ -383,7 +391,7 @@ export class SharedCodexRoot {
         const thread = await this.readThread();
         const turns = Array.isArray(thread.turns) ? thread.turns.map(record) : [];
         if (revision === this.turnRevision) {
-            this.currentTurn = string(turns.find(turn => turn.status === 'inProgress')?.id);
+            this.currentTurn = latestActiveTurnId(turns);
             this.interrupted = turns.at(-1)?.status === 'interrupted';
             const last = turns.at(-1);
             const id = string(last?.id);
