@@ -96,8 +96,8 @@ matching rows.
   attention/status presentation.
 
 Closed sessions use muted grey titles. Running tasks show a spinner beside the
-title in both status modes: green when read, blue when unread. Background-only
-work uses a static blue dot; unread at rest uses a foreground-colour dot. Quiet
+title in both status modes. A separate green dot marks unread content alongside
+any work or pending-request indicator. Background-only work uses a static blue dot. Quiet
 connected sessions keep normal-colour titles without a persistent status label.
 Pending questions and permission requests retain their attention indicators.
 The agent icon also carries the upstream working, waiting, or

@@ -85,8 +85,8 @@ const PRESENCE_BADGE_CLASS = {
  * Presentational session row — same chrome as the sidebar SessionItem body
  * (flavor icon with presence badge, title, request/schedule symbols, todos,
  * relative time, path, optional attached-job meter). Visual language matches
- * the native apps for presence. A title-side spinner combines running activity
- * with unread state; unread at rest uses a foreground dot. The title dims when
+ * the native apps for presence. A title-side spinner shows running activity,
+ * with a separate green dot for unread content. The title dims when
  * the session is not resident. Used by the
  * session list and by rich-composer mention chip tooltips.
  */
@@ -246,9 +246,7 @@ export function SessionRowSummary(props: {
                         >
                             {sessionName}
                         </div>
-                        {/* Model error outranks activity/unread: the turn looked
-                            finished but failed, so this must not be collapsed
-                            into the combined indicator below. */}
+                        {/* Model errors remain visible alongside activity and unread state. */}
                         {modelErrorActive ? (
                             <span
                                 className="relative inline-flex h-2 w-2 shrink-0"
@@ -261,12 +259,13 @@ export function SessionRowSummary(props: {
                         ) : null}
                         {hasForegroundWork ? (
                             <span data-testid="session-activity" role="img" aria-label={activityLabel} title={activityLabel} className="inline-flex shrink-0">
-                                <LoaderIcon className={`h-3.5 w-3.5 animate-spin-slow ${isUnread ? 'text-blue-500' : 'text-[var(--app-badge-success-text)]'}`} />
+                                <LoaderIcon className="h-3.5 w-3.5 animate-spin-slow text-[var(--app-badge-success-text)]" />
                             </span>
                         ) : isBackgroundOnly ? (
                             <span data-testid="session-background" role="img" aria-label={t('session.item.background')} title={t('session.item.background')} className="h-2 w-2 shrink-0 rounded-full bg-blue-500" />
-                        ) : isUnread && !requestKind ? (
-                            <span data-testid="session-unread" className="h-2 w-2 shrink-0 rounded-full bg-[var(--app-fg)]" aria-hidden="true" />
+                        ) : null}
+                        {isUnread ? (
+                            <span data-testid="session-unread" className="h-2 w-2 shrink-0 rounded-full bg-[var(--app-badge-success-text)]" aria-hidden="true" />
                         ) : null}
                         {isUnread ? (
                             <span id={attention?.kind === 'unread' && nestedTooltips ? attentionId : undefined} className="sr-only">
