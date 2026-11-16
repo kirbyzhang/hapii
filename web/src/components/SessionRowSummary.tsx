@@ -86,7 +86,7 @@ const PRESENCE_BADGE_CLASS = {
  * (flavor icon with presence badge, title, request/schedule symbols, todos,
  * relative time, path, optional attached-job meter). Visual language matches
  * the native apps for presence. A title-side spinner shows running activity,
- * with a separate green dot for unread content. The title dims when
+ * with a separate blue dot for unread content. The title dims when
  * the session is not resident. Used by the
  * session list and by rich-composer mention chip tooltips.
  */
@@ -265,7 +265,7 @@ export function SessionRowSummary(props: {
                             <span data-testid="session-background" role="img" aria-label={t('session.item.background')} title={t('session.item.background')} className="h-2 w-2 shrink-0 rounded-full bg-blue-500" />
                         ) : null}
                         {isUnread ? (
-                            <span data-testid="session-unread" className="h-2 w-2 shrink-0 rounded-full bg-[var(--app-badge-success-text)]" aria-hidden="true" />
+                            <span data-testid="session-unread" className="h-2 w-2 shrink-0 rounded-full bg-blue-500" aria-hidden="true" />
                         ) : null}
                         {isUnread ? (
                             <span id={attention?.kind === 'unread' && nestedTooltips ? attentionId : undefined} className="sr-only">
