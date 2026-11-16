@@ -1,6 +1,10 @@
 import type {
     AttachmentMetadata,
+    AbortChunkedUploadResponse,
     AuthResponse,
+    InitChunkedUploadRequest,
+    InitChunkedUploadResponse,
+    UploadChunkResponse,
     CodexLocalSessionsResponse,
     CodexDuplicateSessionsResponse,
     CodexMergeDuplicateSessionsResponse,
@@ -15,6 +19,8 @@ import type {
     MachinesResponse,
     MessageContextResponse,
     MessagesResponse,
+    ClaudeImportSessionsResponse,
+    ClaudeLocalSessionsResponse,
     OpencodeImportSessionsResponse,
     OpencodeLocalSessionsResponse,
     PermissionMode,
@@ -38,6 +44,7 @@ import type {
 import type {
     AgyModelsResponse,
     AgentAvailabilityResponse,
+    AgentQuotasResponse,
     CodexModelsResponse,
     CursorMigrateOutcome,
     CursorMigrateToAcpRequest,
@@ -66,10 +73,12 @@ import type {
     SqliteStorageUsageResponse,
     HubSettingsResponse,
     UpdateHubSettingsRequest,
+    UsageQuotasResponse,
     UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import { fetchThroughAuthProxy } from '@/api/authProxy'
+import { FOLLOW_SESSION_REDIRECTS_HEADER } from '@hapi/protocol'
 import type { SessionReadState, SessionReadStateRequest, AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
 import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
@@ -205,6 +214,27 @@ function parseErrorCode(bodyText: string): string | undefined {
     }
 }
 
+function parseErrorDisplay(bodyText: string): string | undefined {
+    try {
+        const parsed = JSON.parse(bodyText) as ErrorPayload
+        if (typeof parsed.error === 'string' && parsed.error.trim().length > 0) return parsed.error
+        return undefined
+    } catch {
+        return undefined
+    }
+}
+
+/**
+ * User-facing message for a failed API call: unwrap the hub's human error
+ * string instead of leaking the raw `HTTP <status>: <body>` envelope.
+ */
+export function apiErrorMessage(error: unknown, fallback: string): string {
+    if (!(error instanceof ApiError)) {
+        return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback
+    }
+    return parseErrorDisplay(error.body ?? '') ?? error.code?.trim() ?? fallback
+}
+
 export class ApiError extends Error {
     status: number
     code?: string
@@ -257,6 +287,8 @@ export class ApiClient {
         if (authToken) {
             headers.set('authorization', `Bearer ${authToken}`)
         }
+        // The session route rebinds to a survivor's id (getMergedSessionRedirectId).
+        headers.set(FOLLOW_SESSION_REDIRECTS_HEADER, '1')
         if (init?.body !== undefined && !(init.body instanceof FormData) && !headers.has('content-type')) {
             headers.set('content-type', 'application/json')
         }
@@ -464,6 +496,21 @@ export class ApiClient {
         })
     }
 
+    async getClaudeSessions(cwd?: string | null, machineId?: string | null): Promise<ClaudeLocalSessionsResponse> {
+        const params = new URLSearchParams()
+        if (cwd?.trim()) params.set('cwd', cwd.trim())
+        if (machineId?.trim()) params.set('machineId', machineId.trim())
+        const query = params.size ? `?${params.toString()}` : ''
+        return await this.request<ClaudeLocalSessionsResponse>(`/api/claude/sessions${query}`)
+    }
+
+    async importClaudeSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null; model?: string | null; effort?: string | null; permissionMode?: PermissionMode }): Promise<ClaudeImportSessionsResponse> {
+        return await this.request<ClaudeImportSessionsResponse>('/api/claude/import-sessions', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        })
+    }
+
     async archiveCodexSession(sessionId: string, machineId?: string | null): Promise<CodexArchiveSessionResponse> {
         return await this.request<CodexArchiveSessionResponse>('/api/codex/archive-session', {
             method: 'POST',
@@ -662,6 +709,59 @@ export class ApiClient {
         })
     }
 
+    async initChunkedUpload(
+        sessionId: string,
+        payload: InitChunkedUploadRequest,
+        options?: { signal?: AbortSignal }
+    ): Promise<InitChunkedUploadResponse> {
+        return await this.request<InitChunkedUploadResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/uploads`, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            signal: options?.signal
+        })
+    }
+
+    async uploadFileChunk(
+        sessionId: string,
+        uploadId: string,
+        index: number,
+        chunk: Blob | ArrayBuffer | Uint8Array,
+        options?: { signal?: AbortSignal }
+    ): Promise<UploadChunkResponse> {
+        return await this.request<UploadChunkResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/uploads/${encodeURIComponent(uploadId)}/chunk?index=${index}`,
+            {
+                method: 'POST',
+                headers: { 'content-type': 'application/octet-stream' },
+                body: chunk as BodyInit,
+                signal: options?.signal
+            }
+        )
+    }
+
+    async finalizeChunkedUpload(
+        sessionId: string,
+        uploadId: string,
+        options?: { signal?: AbortSignal }
+    ): Promise<UploadFileResponse> {
+        return await this.request<UploadFileResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/uploads/${encodeURIComponent(uploadId)}/finalize`,
+            {
+                method: 'POST',
+                signal: options?.signal
+            }
+        )
+    }
+
+    async abortChunkedUpload(sessionId: string, uploadId: string): Promise<AbortChunkedUploadResponse> {
+        return await this.request<AbortChunkedUploadResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/uploads/${encodeURIComponent(uploadId)}/abort`,
+            {
+                method: 'POST'
+            }
+        )
+    }
+
     async deleteUploadFile(sessionId: string, path: string): Promise<DeleteUploadResponse> {
         return await this.request<DeleteUploadResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/upload/delete`, {
             method: 'POST',
@@ -782,6 +882,86 @@ export class ApiClient {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
             method: 'POST',
             body: JSON.stringify({})
+        })
+    }
+
+    async acknowledgeModelError(sessionId: string, eventId: string): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model-error/acknowledge`, {
+            method: 'POST',
+            body: JSON.stringify({ eventId })
+        })
+    }
+
+    async bridgeModelError(sessionId: string, eventId: string): Promise<{ ok: boolean; reason?: string }> {
+        const path = `/api/sessions/${encodeURIComponent(sessionId)}/model-error/bridge`
+        const tryOnce = async (overrideToken: string | null): Promise<Response> => {
+            const headers = new Headers({ 'content-type': 'application/json' })
+            const liveToken = this.getToken ? this.getToken() : null
+            const authToken = overrideToken ?? liveToken ?? this.token
+            if (authToken) {
+                headers.set('authorization', `Bearer ${authToken}`)
+            }
+            return fetchThroughAuthProxy(this.buildUrl(path), {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ eventId })
+            })
+        }
+
+        let res = await tryOnce(null)
+        if (res.status === 401 && this.onUnauthorized) {
+            const refreshed = await this.onUnauthorized()
+            if (refreshed) {
+                this.token = refreshed
+                res = await tryOnce(refreshed)
+            }
+        }
+        if (res.status === 401) {
+            throw new Error('Session expired. Please sign in again.')
+        }
+
+        const text = await res.text()
+        let body: { ok?: boolean; reason?: string; error?: string } | null = null
+        try {
+            body = text ? JSON.parse(text) as { ok?: boolean; reason?: string; error?: string } : null
+        } catch {
+            body = null
+        }
+
+        if (res.status === 409 && body && typeof body.ok === 'boolean') {
+            return { ok: body.ok, reason: body.reason }
+        }
+
+        if (!res.ok) {
+            const detail = body?.error ?? text
+            throw new ApiError(
+                `HTTP ${res.status} ${res.statusText}: ${detail}`,
+                res.status,
+                undefined,
+                detail || undefined
+            )
+        }
+
+        // A 2xx that is not the hub's `{ ok }` envelope never reached the hub:
+        // an auth gateway can answer with an HTML sign-in page at status 200.
+        // Reporting ok:true there makes SessionChat latch the event as pending,
+        // leaving "Bridging…" disabled forever while no CLI request was made.
+        if (!body || typeof body.ok !== 'boolean') {
+            throw new ApiError(
+                `HTTP ${res.status} ${res.statusText}: unexpected bridge response`,
+                res.status,
+                undefined,
+                text || undefined
+            )
+        }
+
+        return { ok: body.ok, reason: body.reason }
+    }
+
+    async setModelErrorAutoBridge(sessionId: string, enabled: boolean): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/model-error/auto-bridge-setting`, {
+            method: 'POST',
+            body: JSON.stringify({ enabled })
         })
     }
 
@@ -961,6 +1141,16 @@ export class ApiClient {
             timeZone
         })
         return await this.request<UsageSummaryResponse>(`/api/usage/summary?${params.toString()}`)
+    }
+
+    async getUsageQuotas(refresh?: boolean): Promise<UsageQuotasResponse> {
+        return await this.request<UsageQuotasResponse>(`/api/usage/quotas${refresh ? '?refresh=1' : ''}`)
+    }
+
+    async getMachineAgentQuotas(machineId: string, refresh?: boolean): Promise<AgentQuotasResponse> {
+        return await this.request<AgentQuotasResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/agent-quotas${refresh ? '?refresh=1' : ''}`
+        )
     }
 
     async restartMachineRunner(machineId: string): Promise<{ message: string }> {

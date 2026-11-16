@@ -6,7 +6,9 @@ import {
     DecryptedMessageSchema,
     MachineSchema,
     PermissionModeSchema,
-    SessionSchema
+    SessionSchema,
+    MetadataSchema,
+    OpenCodeRewindSchema
 } from './schemas'
 import { AgentFlavorSchema } from './modes'
 import {
@@ -60,6 +62,7 @@ export const CliMessagesResponseSchema = z.object({
         seq: z.number(),
         createdAt: z.number(),
         localId: z.string().nullable().optional(),
+        invokedAt: z.number().nullable().optional(),
         content: z.unknown()
     }))
 })
@@ -69,7 +72,9 @@ export type CliMessagesResponse = z.infer<typeof CliMessagesResponseSchema>
 export const CreateSessionResponseSchema = z.object({
     session: SessionSchema,
     /** Hub opt-in for AGENT_NOTIFY_SUMMARY prompt injection (default off when omitted). */
-    sessionSummaryContract: z.boolean().optional()
+    sessionSummaryContract: z.boolean().optional(),
+    /** Hub opt-in: Cursor auto-bridge after transient model errors (default off). */
+    autoBridgeTransientModelErrors: z.boolean().optional()
 })
 
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
@@ -78,6 +83,7 @@ export const HubSettingsResponseSchema = z.object({
     sessionSummaryContract: z.boolean(),
     /** Show compact AGENT_NOTIFY_SUMMARY in chat (default off / hide). */
     sessionSummaryInChat: z.boolean(),
+    autoBridgeTransientModelErrors: z.boolean(),
     peerSpawnDefaults: ResolvedPeerSpawnDefaultsSchema
 })
 
@@ -87,12 +93,14 @@ export const UpdateHubSettingsRequestSchema = z
     .object({
         sessionSummaryContract: z.boolean().optional(),
         sessionSummaryInChat: z.boolean().optional(),
+        autoBridgeTransientModelErrors: z.boolean().optional(),
         peerSpawnDefaults: PeerSpawnDefaultsSchema.optional()
     })
     .refine(
         (data) =>
             data.sessionSummaryContract !== undefined
             || data.sessionSummaryInChat !== undefined
+            || data.autoBridgeTransientModelErrors !== undefined
             || data.peerSpawnDefaults !== undefined,
         { message: 'At least one hub setting field is required' }
     )
@@ -349,12 +357,54 @@ export const OpencodeLocalSessionSummarySchema = z.object({
     lastUserMessage: z.string().nullable().optional(),
     cwd: z.string().nullable().optional(),
     file: z.string().min(1),
-    modifiedAt: z.number()
+    modifiedAt: z.number(),
+    /** v2 launch hint (D8): the model the session ran with. */
+    model: z.string().nullable().optional()
 })
 
 export const OpencodeLocalSessionWithMessagesSchema = OpencodeLocalSessionSummarySchema.extend({
     messages: z.array(OpencodeImportedMessageSchema)
 })
+
+/**
+ * One importable Claude transcript entry: the native uuid (stable across
+ * session-id rotation), the entry timestamp and the HAPI message content the
+ * live replay path would have sent (user text, or the raw entry as the
+ * 'output' agent payload).
+ */
+export const ClaudeImportedMessageSchema = z.object({
+    uuid: z.string().min(1),
+    createdAt: z.number().optional(),
+    content: z.union([
+        z.object({
+            role: z.literal('user'),
+            content: z.object({ type: z.literal('text'), text: z.string() }),
+            meta: z.object({ sentFrom: z.literal('cli') })
+        }),
+        z.object({
+            role: z.literal('agent'),
+            content: z.object({ type: z.literal('output'), data: z.unknown() }),
+            meta: z.object({ sentFrom: z.literal('cli') })
+        })
+    ])
+})
+
+export const ClaudeLocalSessionSummarySchema = z.object({
+    id: z.string().min(1),
+    title: z.string(),
+    lastUserMessage: z.string().nullable().optional(),
+    cwd: z.string().nullable().optional(),
+    file: z.string().min(1),
+    modifiedAt: z.number(),
+    messageCount: z.number().optional()
+})
+
+export const ClaudeLocalSessionWithMessagesSchema = ClaudeLocalSessionSummarySchema.extend({
+    messages: z.array(ClaudeImportedMessageSchema)
+})
+
+export type ClaudeLocalSessionSummary = z.infer<typeof ClaudeLocalSessionSummarySchema>
+export type ClaudeLocalSessionWithMessages = z.infer<typeof ClaudeLocalSessionWithMessagesSchema>
 
 export const MAX_OPENCODE_SESSION_IMPORTS = 200
 
@@ -546,6 +596,20 @@ export const ScratchlistEntryUpdateRequestSchema = z.object({
 
 export type ScratchlistEntryUpdateRequest = z.infer<typeof ScratchlistEntryUpdateRequestSchema>
 
+/** Dismiss the model-error banner for a specific displayed error (by eventId). */
+export const AcknowledgeModelErrorRequestSchema = z.object({
+    eventId: z.string().min(1)
+})
+
+export type AcknowledgeModelErrorRequest = z.infer<typeof AcknowledgeModelErrorRequestSchema>
+
+/** Bridge & retry for the specific displayed model error (by eventId). */
+export const BridgeModelErrorRequestSchema = z.object({
+    eventId: z.string().min(1)
+})
+
+export type BridgeModelErrorRequest = z.infer<typeof BridgeModelErrorRequestSchema>
+
 /** Per-session legacy stream-json → ACP migrator request. See tiann/hapi#824. */
 export const CursorMigrateToAcpRequestSchema = z.object({
     /** Skip removing the legacy ~/.cursor/chats source store.db even after verify passes. */
@@ -582,6 +646,36 @@ export type CursorMigrateRefusalReason =
     | 'size_mismatch'
     | 'internal_error'
 
+export const LEGACY_SINGLE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+export const DEFAULT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+export const MAX_CONFIGURABLE_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024
+export const UPLOAD_CHUNK_MAX_BYTES = 8 * 1024 * 1024
+export const DEFAULT_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+
+export function resolveMaxUploadBytes(raw?: string | undefined): number {
+    const trimmed = raw?.trim()
+    if (!trimmed || !/^\d+$/.test(trimmed)) {
+        return DEFAULT_MAX_UPLOAD_BYTES
+    }
+    const parsed = Number(trimmed)
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+        return DEFAULT_MAX_UPLOAD_BYTES
+    }
+    return Math.min(parsed, MAX_CONFIGURABLE_UPLOAD_BYTES)
+}
+
+export const UploadErrorCodeSchema = z.enum([
+    'upload_too_large',
+    'upload_chunk_too_large',
+    'upload_not_found',
+    'upload_conflict',
+    'upload_invalid_chunk',
+    'upload_size_mismatch',
+    'upload_incomplete'
+])
+
+export type UploadErrorCode = z.infer<typeof UploadErrorCodeSchema>
+
 export const UploadFileRequestSchema = z.object({
     filename: z.string().min(1).max(255),
     content: z.string().min(1),
@@ -589,6 +683,14 @@ export const UploadFileRequestSchema = z.object({
 })
 
 export type UploadFileRequest = z.infer<typeof UploadFileRequestSchema>
+
+export const InitChunkedUploadRequestSchema = z.object({
+    filename: z.string().min(1).max(255),
+    size: z.number().int().min(0),
+    mimeType: z.string().min(1).max(255)
+})
+
+export type InitChunkedUploadRequest = z.infer<typeof InitChunkedUploadRequestSchema>
 
 export const DeleteUploadRequestSchema = z.object({
     path: z.string().min(1)
@@ -695,6 +797,7 @@ export type RewindConversationResponse = {
 export type ForkConversationRpcResult = {
     completedTurnId?: string
     nativeSessionId: string
+    opencodeHistoryCheckpoint?: NonNullable<Session['metadata']>['opencodeHistoryCheckpoint']
     /** Shared runtimes bind the child themselves; hub must not spawn another engine. */
     sessionId?: string
     /** When true, hub must spawn with --fork-session (Claude). */
@@ -721,6 +824,17 @@ export type ForkArchivedCodexResponse = { nativeSessionId: string } | { error: s
 export type RewindConversationErrorCode =
     | 'ambiguous_native_boundary'
     | 'ambiguous_native_boundary_fork_safe'
+
+export const OpenCodeRewindReportSchema = z.object({
+    operation: OpenCodeRewindSchema,
+    phase: z.enum(['prepared', 'applied', 'unknown', 'rejected']),
+    sourceHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    prefixHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    unchanged: z.literal(true).optional(),
+    checkpoint: MetadataSchema.shape.opencodeHistoryCheckpoint,
+    indexes: z.record(z.string(), z.number().int().nonnegative()).optional()
+})
+export type OpenCodeRewindReport = z.infer<typeof OpenCodeRewindReportSchema>
 
 export type RewindConversationRpcResult = {
     success: true
@@ -803,6 +917,66 @@ export const AgentAvailabilityResponseSchema = z.object({
 })
 export type AgentAvailabilityResponse = z.infer<typeof AgentAvailabilityResponseSchema>
 
+export const AgentQuotaStatusSchema = z.enum([
+    'ok',
+    'custom_provider',
+    'unauthenticated',
+    'unavailable',
+    'error'
+])
+export type AgentQuotaStatus = z.infer<typeof AgentQuotaStatusSchema>
+
+export const AgentQuotaBucketSchema = z.object({
+    id: z.string(),
+    label: z.string(),
+    group: z.string().nullable().optional(),
+    window: z.string().nullable().optional(),
+    usedPercent: z.number().min(0).max(100),
+    remainingPercent: z.number().min(0).max(100),
+    resetsAt: z.number().nullable().optional()
+})
+export type AgentQuotaBucket = z.infer<typeof AgentQuotaBucketSchema>
+
+export const AgentQuotaAccountSchema = z.object({
+    agent: AgentFlavorSchema,
+    available: z.boolean(),
+    status: AgentQuotaStatusSchema,
+    accountLabel: z.string().nullable().optional(),
+    planLabel: z.string().nullable().optional(),
+    creditsLabel: z.string().nullable().optional(),
+    buckets: z.array(AgentQuotaBucketSchema),
+    note: z.string().nullable().optional(),
+    updatedAt: z.number()
+})
+export type AgentQuotaAccount = z.infer<typeof AgentQuotaAccountSchema>
+
+export const AgentQuotasRequestSchema = z.object({
+    refresh: z.boolean().optional()
+})
+export type AgentQuotasRequest = z.infer<typeof AgentQuotasRequestSchema>
+
+export const AgentQuotasResponseSchema = z.object({
+    accounts: z.array(AgentQuotaAccountSchema),
+    fetchedAt: z.number()
+})
+export type AgentQuotasResponse = z.infer<typeof AgentQuotasResponseSchema>
+
+export const UsageMachineQuotasEntrySchema = z.object({
+    machineId: z.string(),
+    machineName: z.string(),
+    supported: z.boolean(),
+    accounts: z.array(AgentQuotaAccountSchema),
+    fetchedAt: z.number().nullable(),
+    error: z.string().optional()
+})
+export type UsageMachineQuotasEntry = z.infer<typeof UsageMachineQuotasEntrySchema>
+
+export const UsageQuotasResponseSchema = z.object({
+    machines: z.array(UsageMachineQuotasEntrySchema),
+    updatedAt: z.number()
+})
+export type UsageQuotasResponse = z.infer<typeof UsageQuotasResponseSchema>
+
 export const AuthRequestSchema = z.union([
     z.object({ initData: z.string() }),
     z.object({ accessToken: z.string() })
@@ -840,6 +1014,29 @@ export type UploadFileResponse = {
     success: boolean
     path?: string
     error?: string
+    code?: string
+}
+
+export type InitChunkedUploadResponse = {
+    success: boolean
+    uploadId?: string
+    chunkSize?: number
+    maxUploadBytes?: number
+    error?: string
+    code?: string
+}
+
+export type UploadChunkResponse = {
+    success: boolean
+    receivedBytes?: number
+    error?: string
+    code?: string
+}
+
+export type AbortChunkedUploadResponse = {
+    success: boolean
+    error?: string
+    code?: string
 }
 
 export type DeleteUploadResponse = {

@@ -84,14 +84,17 @@ describe('SessionList unread visibility', () => {
         ])
 
         // Inactive projects start collapsed; only the unread row peeks out.
-        expect(screen.getByTestId('session-group-unread-peek')).toBeInTheDocument()
-        expect(screen.getByRole('button', { name: /Unread row/ })).toBeInTheDocument()
+        const unreadRow = screen.getByRole('button', { name: /Unread row/ })
         expect(screen.queryByRole('button', { name: /Read row/ })).toBeNull()
 
         fireEvent.click(screen.getByTitle('/work/quiet'))
-        expect(screen.queryByTestId('session-group-unread-peek')).toBeNull()
-        expect(screen.getByRole('button', { name: /Unread row/ })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /Read row/ })).toBeInTheDocument()
+        // Toggling the group keeps the unread row mounted in place instead of
+        // moving it between lists, which restarted its icon and spinner.
+        expect(screen.getByRole('button', { name: /Unread row/ })).toBe(unreadRow)
+
+        fireEvent.click(screen.getByTitle('/work/quiet'))
+        expect(screen.getByRole('button', { name: /Unread row/ })).toBe(unreadRow)
     })
 
     it('shows nothing under a collapsed project once everything is read', () => {
@@ -100,7 +103,6 @@ describe('SessionList unread visibility', () => {
             makeSession({ id: 'read', updatedAt: 1000, metadata: { path: '/work/quiet', name: 'Read row' } })
         ])
 
-        expect(screen.queryByTestId('session-group-unread-peek')).toBeNull()
         expect(screen.queryByRole('button', { name: /Read row/ })).toBeNull()
     })
 
@@ -140,7 +142,9 @@ describe('SessionList unread visibility', () => {
             makeSession({ id: 'peek-read', metadata: { path: '/work/peek', name: 'Already read row' } })
         ])
 
-        expect(screen.getByTestId('session-group-unread-peek')).toBeInTheDocument()
+        const header = screen.getByTitle('/work/peek')
+        const retainedUnreadRow = screen.getByRole('button', { name: /Unread peek 1/ })
+        expect(header).toHaveAttribute('aria-expanded', 'false')
         expect(screen.getAllByRole('button', { name: /Unread peek/ })).toHaveLength(5)
         expect(screen.queryByRole('button', { name: /Already read row/ })).toBeNull()
 
@@ -148,17 +152,23 @@ describe('SessionList unread visibility', () => {
         expect(screen.queryByRole('button', { name: /Unread peek 0/ })).toBeNull()
         expect(screen.getAllByRole('button', { name: /Unread peek/ })).toHaveLength(4)
 
-        fireEvent.click(screen.getByTitle('/work/peek'))
-        expect(screen.queryByTestId('session-group-unread-peek')).toBeNull()
+        fireEvent.click(header)
+        expect(header).toHaveAttribute('aria-expanded', 'true')
         expect(screen.getAllByRole('button', { name: /Unread peek/ })).toHaveLength(4)
+        expect(screen.getByRole('button', { name: /Unread peek 1/ })).toBe(retainedUnreadRow)
         expect(screen.queryByRole('button', { name: /Already read row/ })).toBeNull()
 
-        fireEvent.click(screen.getByTitle('/work/peek'))
-        fireEvent.transitionEnd(screen.getByTitle('/work/peek').parentElement!.querySelector('.collapsible-panel')!)
+        fireEvent.click(header)
+        expect(header).toHaveAttribute('aria-expanded', 'false')
+        expect(screen.getByRole('button', { name: /Unread peek 1/ })).toBe(retainedUnreadRow)
+        expect(screen.getAllByRole('button', { name: /Unread peek/ })).toHaveLength(4)
         act(() => {
             for (const session of unreadSessions) markSessionSeen(session.id, 2000)
         })
-        expect(screen.queryByTestId('session-group-unread-peek')).toBeNull()
+        for (const panel of document.querySelectorAll('.collapsible-panel:not([data-open])')) {
+            fireEvent.transitionEnd(panel)
+        }
+        expect(header).toHaveAttribute('aria-expanded', 'false')
         expect(screen.queryByRole('button', { name: /Unread peek/ })).toBeNull()
     })
 })
@@ -176,7 +186,6 @@ describe('SessionList unread visibility setting off', () => {
             makeSession({ id: 'unread', updatedAt: 2000, metadata: { path: '/work/quiet', name: 'Unread row' } })
         ])
 
-        expect(screen.queryByTestId('session-group-unread-peek')).toBeNull()
         expect(screen.queryByRole('button', { name: /Unread row/ })).toBeNull()
         expect(screen.queryByRole('button', { name: /Read row/ })).toBeNull()
     })
@@ -211,7 +220,7 @@ describe('SessionList unread visibility setting off', () => {
         expect(screen.getByRole('button', { name: /Selected closed row/ })).toHaveAttribute('aria-current', 'page')
         expect(screen.queryByRole('button', { name: /Unread closed row/ })).toBeNull()
         expect(screen.queryByRole('button', { name: /Read closed row/ })).toBeNull()
-        expect(screen.queryByTestId('session-group-unread-peek')).toBeNull()
+        expect(screen.getByTitle('/work/mixed')).toHaveAttribute('aria-expanded', 'true')
         expect(screen.getByRole('button', { name: 'Expand 2' })).toBeInTheDocument()
     })
 })

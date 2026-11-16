@@ -10,6 +10,7 @@ describe('StatusBar context details popover', () => {
     })
 
     it.each(['Bash', 'request_user_input'])('recomputes pending status for %s when only the user-message watermark advances', (tool) => {
+        const pendingLabel = tool === 'Bash' ? 'Approval required' : 'Awaiting your answer'
         const agentState: AgentState = {
             requests: { old: { tool, arguments: {}, createdAt: 150 } }
         }
@@ -19,10 +20,10 @@ describe('StatusBar context details popover', () => {
             </I18nProvider>
         )
         const { rerender } = render(status(100))
-        expect(screen.getByText('permission required')).toBeInTheDocument()
+        expect(screen.getByText(pendingLabel)).toBeInTheDocument()
 
         rerender(status(200))
-        expect(screen.queryByText('permission required')).toBeNull()
+        expect(screen.queryByText(pendingLabel)).toBeNull()
         expect(screen.getByText('online')).toBeInTheDocument()
         expect(Object.keys(agentState.requests ?? {})).toEqual(['old'])
 
@@ -30,9 +31,9 @@ describe('StatusBar context details popover', () => {
             requests: { ...agentState.requests, current: { tool, arguments: {}, createdAt: 201 } }
         }
         rerender(status(201, newState))
-        expect(screen.getByText('permission required')).toBeInTheDocument()
+        expect(screen.getByText(pendingLabel)).toBeInTheDocument()
         rerender(status(202, newState))
-        expect(screen.queryByText('permission required')).toBeNull()
+        expect(screen.queryByText(pendingLabel)).toBeNull()
         expect(screen.getByText('online')).toBeInTheDocument()
     })
 
