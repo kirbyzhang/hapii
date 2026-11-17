@@ -4,65 +4,180 @@ on:
     push:
         tags:
             - 'v*'
+        # Validate release workflow edits before publishing an immutable tag.
+        branches:
+            - main
+            - fix/session-list-v31-behavior
+        paths:
+            - '.github/workflows/release.yml'
 
 permissions:
     contents: write
-    # npm Trusted Publishing (OIDC); no npm token is stored in the repo.
     id-token: write
 
 concurrency:
     group: release-${{ github.ref }}
 
 jobs:
-    release:
+    build:
         runs-on: ubuntu-latest
+        timeout-minutes: 30
+        outputs:
+            version: ${{ steps.version.outputs.version }}
         steps:
             - uses: actions/checkout@v4
             - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version-file: package.json
             - uses: actions/setup-node@v4
               with:
                   node-version: 24
-            # Trusted Publishing needs npm >= 11.5.1.
-            - run: npm install -g npm@11
-            - name: Check tag matches CLI version
+            - name: Check release version
+              id: version
               run: |
                   VERSION="$(node -p "require('./cli/package.json').version")"
-                  if [[ "v$VERSION" != "$GITHUB_REF_NAME" ]]; then
-                      echo "::error::Tag $GITHUB_REF_NAME does not match cli/package.json version $VERSION"
+                  if [[ "$GITHUB_REF_TYPE" == tag && "v$VERSION" != "$GITHUB_REF_NAME" ]]; then
+                      echo "::error::Tag $GITHUB_REF_NAME does not match CLI version $VERSION"
                       exit 1
                   fi
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             - run: bun install --frozen-lockfile
             - run: bun run build:single-exe:all
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: non-macos-binaries
+                  if-no-files-found: error
+                  path: |
+                      cli/dist-exe/bun-linux-x64-baseline/hapi
+                      cli/dist-exe/bun-linux-arm64/hapi
+                      cli/dist-exe/bun-windows-x64/hapi.exe
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: unsigned-bun-darwin-x64
+                  if-no-files-found: error
+                  path: cli/dist-exe/bun-darwin-x64/hapi
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: unsigned-bun-darwin-arm64
+                  if-no-files-found: error
+                  path: cli/dist-exe/bun-darwin-arm64/hapi
+
+    sign-macos:
+        needs: build
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 20
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - target: bun-darwin-x64
+                      runner: macos-15-intel
+                    - target: bun-darwin-arm64
+                      runner: macos-15
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: unsigned-${{ matrix.target }}
+                  path: binary
+            - name: Sign and verify native macOS executable
+              env:
+                  EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+              run: |
+                  binary="$PWD/binary/hapi"
+                  chmod 755 "$binary"
+                  payload_hash() {
+                    python3 - "$binary" <<'PYTHON'
+                  import hashlib, struct, sys
+                  with open(sys.argv[1], 'rb') as f:
+                      header = f.read(32)
+                      assert header[:4] == b'\xcf\xfa\xed\xfe'
+                      ncmds, size = struct.unpack_from('<II', header, 16)
+                      commands = f.read(size)
+                      offset = 0
+                      for _ in range(ncmds):
+                          cmd, length = struct.unpack_from('<II', commands, offset)
+                          assert length >= 8 and offset + length <= len(commands)
+                          if cmd == 0x19 and commands[offset + 8:offset + 24].rstrip(b'\0') == b'__BUN':
+                              start, count = struct.unpack_from('<QQ', commands, offset + 40)
+                              f.seek(start)
+                              payload = f.read(count)
+                              assert len(payload) == count
+                              print(hashlib.sha256(payload).hexdigest())
+                              break
+                          offset += length
+                      else:
+                          raise SystemExit('Missing __BUN payload')
+                  PYTHON
+                  }
+                  before="$(payload_hash)"
+                  codesign --force --sign - --timestamp=none "$binary"
+                  codesign --verify --strict --verbose=4 "$binary"
+                  test "$(payload_hash)" = "$before"
+                  actual="$("$binary" --version)"
+                  test "$actual" = "hapi version: $EXPECTED_VERSION"
+                  echo "$actual"
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: signed-${{ matrix.target }}
+                  if-no-files-found: error
+                  path: binary/hapi
+
+    release:
+        if: startsWith(github.ref, 'refs/tags/v')
+        needs: [build, sign-macos]
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/download-artifact@v4
+              with:
+                  name: non-macos-binaries
+                  path: cli/dist-exe
+            - uses: actions/download-artifact@v4
+              with:
+                  name: signed-bun-darwin-x64
+                  path: cli/dist-exe/bun-darwin-x64
+            - uses: actions/download-artifact@v4
+              with:
+                  name: signed-bun-darwin-arm64
+                  path: cli/dist-exe/bun-darwin-arm64
+            - uses: oven-sh/setup-bun@v2
+              if: github.repository == 'tiann/hapi'
+              with:
+                  bun-version-file: package.json
+            - uses: actions/setup-node@v4
+              if: github.repository == 'tiann/hapi'
+              with:
+                  node-version: 24
+            - name: Prepare npm Trusted Publishing
+              if: github.repository == 'tiann/hapi'
+              run: npm install -g npm@11 && bun install --frozen-lockfile
             - name: Publish to npm
               if: github.repository == 'tiann/hapi'
               run: bun run --cwd cli publish-npm
-            - name: Package release artifacts
+            - name: Package verified release artifacts
               run: |
                   cd cli/dist-exe
                   mkdir -p ../release-artifacts
-
-                  for dir in bun-*/; do
-                      target="${dir%/}"
-                      # bun-darwin-arm64 -> hapi-darwin-arm64
+                  for target in bun-darwin-x64 bun-darwin-arm64 bun-linux-x64-baseline bun-linux-arm64 bun-windows-x64; do
                       name="hapi-${target#bun-}"
                       name="${name/windows/win32}"
-
-                      if [[ "$target" == *"windows"* ]]; then
-                          zip -j "../release-artifacts/${name}.zip" "$target"/hapi.exe
+                      if [[ "$target" == *windows* ]]; then
+                          test -f "$target/hapi.exe"
+                          zip -j "../release-artifacts/${name}.zip" "$target/hapi.exe"
                       else
+                          chmod 755 "$target/hapi"
                           tar -czvf "../release-artifacts/${name}.tar.gz" -C "$target" hapi
                       fi
                   done
-
                   cd ../release-artifacts
-                  sha256sum * > checksums.txt
+                  sha256sum *.tar.gz *.zip > checksums.txt
             - name: Create Release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
-                  gh release create "${GITHUB_REF#refs/tags/}" \
-                      --title "Release ${GITHUB_REF#refs/tags/}" \
-                      --generate-notes \
+                  gh release create "$GITHUB_REF_NAME" --verify-tag --latest \
+                      --title "Release $GITHUB_REF_NAME" --generate-notes \
                       cli/release-artifacts/*
             - name: Update Homebrew formula
               if: github.repository == 'tiann/hapi'
@@ -70,5 +185,5 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
               run: |
-                  VERSION="${GITHUB_REF#refs/tags/v}"
+                  VERSION="${GITHUB_REF_NAME#v}"
                   cd cli && bun run update-homebrew-formula --version "$VERSION" --push
