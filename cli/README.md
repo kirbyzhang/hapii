@@ -451,6 +451,13 @@ Keep local release builds on that version too. Bun 1.4.0 produces invalid
 darwin-arm64 signatures that macOS 27 rejects with `SIGKILL`; Bun 1.4.4 includes
 the [upstream signing fix](https://github.com/oven-sh/bun/pull/39837).
 
+The release workflow also re-signs both macOS executables ad hoc on native macOS
+runners. It verifies each signature, checks that the embedded `__BUN` payload is
+unchanged, and runs `--version` on each architecture before publishing. The x64
+cross-compiled output can retain the runtime's original signature, so pinning Bun
+alone is not sufficient. Local release builds need the same signing and
+verification steps; these checks do not constitute Developer ID notarization.
+
 ## Related docs
 
 - `../hub/README.md`

@@ -1,6 +1,15 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Locator } from '@playwright/test'
 import { mkdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
+
+async function expectBlueUnread(row: Locator) {
+    const dot = row.getByTestId('session-unread')
+    await expect(dot).toBeVisible()
+    await expect(dot).toHaveClass(/\bbg-blue-500\b/)
+    await expect(dot).toHaveCSS('background-color', 'oklch(0.623 0.214 259.815)')
+    await expect(dot).toHaveCSS('width', '8px')
+    await expect(dot).toHaveCSS('height', '8px')
+}
 
 for (const theme of ['light', 'dark', 'oled']) {
     for (const width of [390, 1280]) {
@@ -15,28 +24,26 @@ for (const theme of ['light', 'dark', 'oled']) {
             await expect(spinner).toBeVisible()
             await expect(spinner).toHaveCSS('animation-name', 'spin')
             await expect(working.getByTestId('session-unread')).toHaveCount(0)
-            const grey = await spinner.evaluate(el => getComputedStyle(el).color)
+            const green = theme === 'light' ? 'rgb(21, 128, 61)' : 'rgb(74, 222, 128)'
+            await expect(spinner).toHaveCSS('color', green)
             const unreadSpinner = row('Working · unread output').getByTestId('session-activity').locator('svg')
             await expect(unreadSpinner).toBeVisible()
             await expect(unreadSpinner).toHaveCSS('animation-name', 'spin')
-            expect(await unreadSpinner.evaluate(el => getComputedStyle(el).color)).not.toBe(grey)
-            const dot = row('Finished · unread output').getByTestId('session-unread')
-            await expect(dot).toBeVisible()
-            const foreground = await row('Finished · unread output').locator('[title="Finished · unread output"]').evaluate(el => getComputedStyle(el).color)
-            await expect(dot).toHaveCSS('background-color', foreground)
+            await expect(unreadSpinner).toHaveCSS('color', green)
+            await expectBlueUnread(row('Working · unread output'))
+            await expectBlueUnread(row('Finished · unread output'))
             await expect(row('Finished · all output read').getByTestId('session-unread')).toHaveCount(0)
-            await expect(row('Waiting for permission').getByTestId('session-unread')).toHaveCount(0)
+            await expectBlueUnread(row('Waiting for permission'))
             await expect(row('Waiting for permission').getByTestId('session-activity')).toBeVisible()
-            await expect(row('Waiting for permission').locator('[aria-label="pending"], [aria-label="Permission required"]').first()).toBeVisible()
+            await expect(row('Waiting for permission').getByTestId('session-activity').locator('svg')).toHaveCSS('color', green)
+            await expect(row('Waiting for permission').locator('[aria-label="pending"], [aria-label="Approval required"]').first()).toBeVisible()
             const backgroundUnread = row('Background work · unread output')
             const backgroundRead = row('Background work · all output read')
             await expect(backgroundUnread.getByTestId('session-background')).toBeVisible()
-            const blueSpinner = await unreadSpinner.evaluate(el => getComputedStyle(el).color)
-            const blueDot = await backgroundUnread.getByTestId('session-background').evaluate(el => getComputedStyle(el).backgroundColor)
-            expect(blueDot).toBe(blueSpinner)
+            await expect(backgroundUnread.getByTestId('session-background')).toHaveCSS('background-color', 'oklch(0.623 0.214 259.815)')
             await expect(backgroundUnread.getByTestId('session-background')).toHaveCSS('animation-name', 'none')
             await expect(backgroundUnread.getByTestId('session-activity')).toHaveCount(0)
-            await expect(backgroundUnread.getByTestId('session-unread')).toHaveCount(0)
+            await expectBlueUnread(backgroundUnread)
             await expect(backgroundUnread.getByTestId('session-presence')).toHaveAttribute('data-presence', 'waiting')
             await expect(backgroundUnread.getByTestId('session-presence')).not.toHaveClass(/animate-pulse/)
             await expect(backgroundRead.getByTestId('session-background')).toBeVisible()
@@ -44,7 +51,9 @@ for (const theme of ['light', 'dark', 'oled']) {
             await expect(backgroundRead.getByTestId('session-activity')).toHaveCount(0)
             const unreadWeight = await backgroundUnread.locator('[title="Background work · unread output"]').evaluate(el => getComputedStyle(el).fontWeight)
             const readWeight = await backgroundRead.locator('[title="Background work · all output read"]').evaluate(el => getComputedStyle(el).fontWeight)
-            expect(Number(unreadWeight)).toBeGreaterThan(Number(readWeight))
+            expect(unreadWeight).toBe('400')
+            expect(readWeight).toBe('400')
+            await expect(backgroundRead.getByTestId('session-unread')).toHaveCount(0)
             expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 
             if (process.env.HAPI_SCREENSHOT_DIR) {
@@ -53,23 +62,29 @@ for (const theme of ['light', 'dark', 'oled']) {
             }
 
             await page.evaluate(() => window.activityFixture.patch('running-read', { contentRevision: 3 }))
-            await expect(spinner).toHaveCSS('color', await unreadSpinner.evaluate(el => getComputedStyle(el).color))
+            await expect(spinner).toHaveCSS('color', green)
+            await expectBlueUnread(working)
             await page.evaluate(() => window.activityFixture.read('running-read'))
-            await expect(spinner).toHaveCSS('color', grey)
+            await expect(spinner).toHaveCSS('color', green)
+            await expect(working.getByTestId('session-unread')).toHaveCount(0)
             await page.evaluate(() => window.activityFixture.unread('running-read'))
-            await expect(spinner).not.toHaveCSS('color', grey)
+            await expect(spinner).toHaveCSS('color', green)
+            await expectBlueUnread(working)
             await page.evaluate(() => window.activityFixture.patch('running-read', { thinking: false }))
             await expect(working.getByTestId('session-activity')).toHaveCount(0)
-            await expect(working.getByTestId('session-unread')).toBeVisible()
+            await expectBlueUnread(working)
             await page.evaluate(() => window.activityFixture.read('running-read'))
             await expect(working.getByTestId('session-unread')).toHaveCount(0)
 
             await page.evaluate(() => window.activityFixture.patch('background', { thinking: true }))
             await expect(backgroundUnread.getByTestId('session-background')).toHaveCount(0)
             await expect(backgroundUnread.getByTestId('session-activity')).toBeVisible()
+            await expect(backgroundUnread.getByTestId('session-activity').locator('svg')).toHaveCSS('color', green)
+            await expectBlueUnread(backgroundUnread)
             await page.evaluate(() => window.activityFixture.patch('background', { thinking: false }))
             await expect(backgroundUnread.getByTestId('session-activity')).toHaveCount(0)
             await expect(backgroundUnread.getByTestId('session-background')).toBeVisible()
+            await expectBlueUnread(backgroundUnread)
             await page.evaluate(() => window.activityFixture.patch('background-read', { backgroundTaskCount: 0 }))
             await expect(backgroundRead.getByTestId('session-background')).toHaveCount(0)
             await expect(backgroundRead.getByTestId('session-unread')).toHaveCount(0)
@@ -78,9 +93,10 @@ for (const theme of ['light', 'dark', 'oled']) {
     }
 }
 
-test('keeps the combined indicator in the pinned in-progress layout', async ({ page }) => {
+test('keeps the green activity spinner and separate blue unread dot in the pinned in-progress layout', async ({ page }) => {
     await page.goto('/e2e-fixtures/session-activity-fixture.html?theme=dark&pinned')
     const row = page.getByRole('button', { name: /^Working · unread output/ })
     await expect(row.getByTestId('session-activity')).toBeVisible()
-    await expect(row.getByTestId('session-unread')).toHaveCount(0)
+    await expect(row.getByTestId('session-activity').locator('svg')).toHaveCSS('color', 'rgb(74, 222, 128)')
+    await expectBlueUnread(row)
 })
