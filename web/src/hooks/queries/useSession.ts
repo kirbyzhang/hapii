@@ -2,6 +2,7 @@ import { mergeSessionSnapshot } from '@/lib/sessionSnapshot'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
 import type { Session } from '@/types/api'
+import { readSessionWithLiveUpdates } from '@/lib/sessionDetailRead'
 import { queryKeys } from '@/lib/query-keys'
 
 export function isSessionNotFoundError(error: unknown): boolean {
@@ -23,6 +24,7 @@ export const SESSION_DETAIL_STALE_TIME_MS = 30_000
 export function useSession(api: ApiClient | null, sessionId: string | null): {
     session: Session | null
     isLoading: boolean
+    isFetching: boolean
     error: string | null
     notFound: boolean
     refetch: () => Promise<unknown>
@@ -35,12 +37,19 @@ export function useSession(api: ApiClient | null, sessionId: string | null): {
             if (!api || !sessionId) {
                 throw new Error('Session unavailable')
             }
-            const response = await api.getSession(sessionId)
+            const response = await readSessionWithLiveUpdates(queryClient, sessionId, () => api.getSession(sessionId))
             const current = queryClient.getQueryData<{ session: Session }>(queryKeys.session(sessionId))?.session
-            return { ...response, session: mergeSessionSnapshot(current, response.session) }
+            return { ...response, session: { ...mergeSessionSnapshot(current, response.session),
+                ...(current && current.metadataVersion > response.session.metadataVersion
+                    ? { metadata: current.metadata, metadataVersion: current.metadataVersion } : {})
+            } }
         },
         enabled: Boolean(api && sessionId),
         staleTime: SESSION_DETAIL_STALE_TIME_MS,
+        // A cached disconnect can outlive a short reconnect. Verify it on entry,
+        // without refetching every active session or archived transcript.
+        refetchOnMount: query => query.state.data?.session.active === false
+            && query.state.data.session.metadata?.lifecycleState !== 'archived' ? 'always' : true,
         retry: (failureCount, error) => {
             if (isSessionNotFoundError(error)) {
                 return false
@@ -52,6 +61,7 @@ export function useSession(api: ApiClient | null, sessionId: string | null): {
     return {
         session: query.data?.session ?? null,
         isLoading: query.isLoading,
+        isFetching: query.isFetching,
         error: query.error instanceof Error ? query.error.message : query.error ? 'Failed to load session' : null,
         notFound: isSessionNotFoundError(query.error) && !query.isFetching,
         refetch: query.refetch,

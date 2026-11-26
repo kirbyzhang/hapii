@@ -154,6 +154,8 @@ jobs:
               run: npm install -g npm@11 && bun install --frozen-lockfile
             - name: Publish to npm
               if: github.repository == 'tiann/hapi'
+              env:
+                  NPM_PUBLISH_WAIT_TIMEOUT_SECONDS: ${{ vars.NPM_PUBLISH_WAIT_TIMEOUT_SECONDS }}
               run: bun run --cwd cli publish-npm
             - name: Package verified release artifacts
               run: |

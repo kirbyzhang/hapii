@@ -570,6 +570,28 @@ html:has(.chat-scroll-y) #root {
     padding-left: 8px;
 }
 
+/*
+ * Open-session position mark on the left scrollbar gutter.
+ * Visual-only: a tiny hover target for the native title tooltip, not a jump
+ * button — the scrollbar beside it stays the seek surface. Sits in the
+ * outer 3px of the 10px rail so it never hides under the thumb (left 3px, 4px
+ * wide). Sibling of the scroll container inside the relative session-list
+ * shell, so `top` maps onto the visible rail.
+ */
+.session-list-open-tick {
+    position: absolute;
+    left: 0;
+    z-index: 10;
+    width: 3px;
+    height: 6px;
+    margin-top: -3px;
+    pointer-events: auto;
+    border-radius: 1px;
+    background: var(--app-link);
+    opacity: 0.9;
+    box-shadow: 0 0 0 1px var(--app-bg);
+}
+
 /* Desktop sidebar: use custom width from CSS variable.
    Kept in sync with the Tailwind `split` breakpoint (see tailwind.config.ts)
    so the sidebar width/resize applies as soon as the split view appears on
@@ -884,10 +906,6 @@ html[data-theme="oled"] .shiki span:not([data-line-number]) {
   animation: spin 1s linear infinite;
 }
 
-.animate-spin-slow {
-  animation: spin 2s linear infinite;
-}
-
 /* New messages indicator bounce animation */
 @keyframes bounce-in {
   0% {
@@ -914,21 +932,7 @@ html[data-theme="oled"] .shiki span:not([data-line-number]) {
  * drift slowly. Quiet contrast + slow background-position, not a loud chunk
  * marquee and not a frozen empty track.
  */
-/*
- * Seamless loop: shift must equal one background-size tile (was -12px on an
- * 8px tile → visible jump every cycle). For -45° stripes, move both axes by
- * one tile so the diagonal phase matches at the loop boundary.
- */
-@keyframes attached-job-indeterminate-stripes {
-  from {
-    background-position: 0 0;
-  }
-  to {
-    background-position: 8px 8px;
-  }
-}
-
-.animate-attached-job-indeterminate {
+.attached-job-stripes {
   position: absolute;
   inset: 0;
   border-radius: inherit;
@@ -942,13 +946,12 @@ html[data-theme="oled"] .shiki span:not([data-line-number]) {
     transparent 66%
   );
   background-size: 8px 8px;
-  animation: attached-job-indeterminate-stripes 5s linear infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .animate-attached-job-indeterminate {
-    animation: none;
-  }
+  /*
+   * No animation here: the shared low-rate ticker writes `background-position`
+   * (tile/40 px per tick — one 8px tile per 5 s, both axes so the -45° diagonal
+   * phase matches at the loop boundary). Keeping this static means the page
+   * produces no 60 Hz frames while the stripes still drift.
+   */
 }
 
 /* ReactQueryDevtools button - move to middle-right to avoid blocking UI */

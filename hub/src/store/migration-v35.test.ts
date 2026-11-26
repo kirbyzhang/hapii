@@ -22,6 +22,7 @@ describe('Store V34->V35 usage parser migration', () => {
             db.exec(`
                 ALTER TABLE usage_scan_state DROP COLUMN parser_version;
                 DROP TABLE session_redirects;
+                DROP TABLE passkey_credentials;
                 PRAGMA user_version = 34;
             `)
             db.prepare('INSERT INTO usage_scan_state (session_id, message_epoch, last_seq) VALUES (?, 1, 42)').run(session.id)
@@ -45,7 +46,7 @@ describe('Store V34->V35 usage parser migration', () => {
             db = new Database(path, { readwrite: true, strict: true })
             expect(columns().find(column => column.name === 'parser_version')?.dflt_value).toBe('2')
             expect(db.prepare('SELECT COUNT(*) AS count FROM usage_scan_state').get()).toEqual({ count: 0 })
-            expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 35 })
+            expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 36 })
             expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_redirects'").get())
                 .toEqual({ name: 'session_redirects' })
             expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_session_redirects_namespace_new'").get())
