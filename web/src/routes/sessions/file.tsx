@@ -232,7 +232,8 @@ export default function FilePage() {
     )
 
     const filePath = useMemo(() => decodePath(encodedPath), [encodedPath])
-    const fileName = filePath.split('/').pop() || filePath || t('file.page.fallbackName')
+    const windowsPath = /^[A-Za-z]:[\\/]/.test(session?.metadata?.path ?? filePath)
+    const fileName = filePath.split(windowsPath ? /[\\/]/ : '/').pop() || filePath || t('file.page.fallbackName')
     const imageMimeType = useMemo(() => resolveImageMimeType(filePath), [filePath])
     const markdownFile = useMemo(() => isMarkdownFile(filePath), [filePath])
     const htmlFile = useMemo(() => isHtmlFile(filePath), [filePath])
@@ -293,7 +294,7 @@ export default function FilePage() {
         && decodedContent.length > 0
         && contentSizeBytes <= MAX_COPYABLE_FILE_BYTES
 
-    const canDownload = fileContentResult?.success === true && Boolean(fileContentResult.content)
+    const downloadableContent = fileContentResult?.success ? fileContentResult.content : undefined
 
     const [displayMode, setDisplayMode] = useState<'diff' | 'file'>('diff')
     const { codeWrap, setCodeWrap } = useCodeWrap()
@@ -429,12 +430,13 @@ export default function FilePage() {
                     >
                         {pathCopied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
                     </button>
-                    {canDownload ? (
+                    {downloadableContent !== undefined ? (
                         <button
                             type="button"
-                            onClick={() => downloadBase64File(fileName, fileContentResult!.content!, imageMimeType)}
+                            onClick={() => downloadBase64File(fileName, downloadableContent, imageMimeType)}
                             className="shrink-0 rounded p-1 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)] transition-colors"
                             title={t('file.page.download')}
+                            aria-label={t('file.page.download')}
                         >
                             <DownloadIcon className="h-3.5 w-3.5" />
                         </button>

@@ -10,6 +10,7 @@ const goBackMock = vi.fn()
 const copyMock = vi.hoisted(() => vi.fn())
 const getGitDiffFileMock = vi.hoisted(() => vi.fn())
 const readSessionFileMock = vi.hoisted(() => vi.fn())
+const downloadBase64FileMock = vi.hoisted(() => vi.fn())
 
 const sampleMarkdown = '# Heading\n\n| Col A | Col B |\n| --- | --- |\n| one | two |'
 const filePath = 'docs/README.md'
@@ -45,6 +46,8 @@ vi.mock('@/hooks/useCopyToClipboard', () => ({
         copy: copyMock,
     }),
 }))
+
+vi.mock('@/lib/file-download', () => ({ downloadBase64File: downloadBase64FileMock }))
 
 vi.mock('@/lib/shiki', () => ({
     langAlias: { md: 'markdown' },
@@ -120,6 +123,15 @@ describe('FilePage markdown preview', () => {
         await waitFor(() => {
             expect(screen.getByTestId('markdown-preview')).toBeInTheDocument()
         })
+    })
+
+    it('downloads a successfully read empty file', async () => {
+        readSessionFileMock.mockResolvedValue({ success: true, content: '', size: 0 })
+        renderWithProviders()
+
+        fireEvent.click(await screen.findByRole('button', { name: 'Download file' }))
+
+        expect(downloadBase64FileMock).toHaveBeenCalledWith('README.md', '', null)
     })
 
     it('collapses long preview errors until clicked', async () => {

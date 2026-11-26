@@ -3,7 +3,7 @@ const FILE_PATH_HREF_PREFIX = 'hapi-file:'
 // which breaks drive detection. Candidate scheme preserves the path through hast.
 const FILE_PATH_CANDIDATE_HREF_PREFIX = 'hapi-file-candidate:'
 
-const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\.\/|[A-Za-z0-9_.-]+\/)[^\s`"\'<>]*?\.(?:[A-Za-z0-9]{1,12}|lock)(?::\d+(?::\d+)?)?|(?:[A-Za-z0-9_.-]+\.(?:[A-Za-z0-9]{1,12}|lock))(?::\d+(?::\d+)?)?/g
+const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\.\/|[A-Za-z0-9_.-]+\/)[^\s`"\'<>]*?\.(?:[A-Za-z0-9]{1,12}|lock)(?![A-Za-z0-9]|\.[A-Za-z0-9])(?::\d+(?::\d+)?)?|(?:[A-Za-z0-9_.-]+\.(?:[A-Za-z0-9]{1,12}|lock))(?::\d+(?::\d+)?)?/g
 
 const TRAILING_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?'])
 // Extensions that autolink to the session file viewer. Kept intentionally
@@ -15,11 +15,11 @@ const TRAILING_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?'])
 // are deliberately excluded so URLs like "example.org" don't autolink.
 export const COMMON_FILE_EXTENSIONS = new Set([
     'adoc', 'astro', 'avif', 'bat', 'bmp', 'c', 'cfg', 'cjs', 'conf', 'cpp', 'css', 'csv',
-    'env', 'gif', 'go', 'gql', 'gradle', 'graphql', 'h', 'hpp', 'html', 'ico', 'ini', 'java',
+    'doc', 'docx', 'env', 'gif', 'go', 'gql', 'gradle', 'graphql', 'gz', 'h', 'hpp', 'html', 'ico', 'ini', 'java',
     'jpeg', 'jpg', 'js', 'json', 'jsx', 'kt', 'lock', 'md', 'mdx', 'mjs', 'mmd', 'php', 'png',
-    'prisma', 'properties', 'proto', 'ps1', 'puml', 'py', 'rb', 'rs', 'rst', 'scss', 'sh',
-    'sql', 'svelte', 'svg', 'swift', 'tex', 'toml', 'ts', 'tsv', 'tsx', 'txt', 'vue', 'webp',
-    'xml', 'yaml', 'yml', 'zsh'
+    'pdf', 'ppt', 'pptx', 'prisma', 'properties', 'proto', 'ps1', 'puml', 'py', 'rb', 'rs', 'rst', 'scss', 'sh',
+    'sql', 'svelte', 'svg', 'swift', 'tar', 'tex', 'toml', 'ts', 'tsv', 'tsx', 'txt', 'vue', 'webp',
+    'xls', 'xlsx', 'xml', 'yaml', 'yml', 'zip', 'zsh'
 ])
 
 type MarkdownNode = {
@@ -236,12 +236,19 @@ function rewriteFileLinkNode(node: MarkdownNode): void {
         node.url = createFileCandidateHref(target)
         return
     }
-    if (target.startsWith('/') && !target.startsWith('//')) return
-    if (target.includes(':')) return
+    // Explicit hrefs can be percent-encoded. Decode before checking that the
+    // target is relative, and encode only the handoff to the file viewer.
+    let path: string
+    try {
+        path = decodeURIComponent(target)
+    } catch {
+        return
+    }
+    if (path.includes(':') || path.includes('\\')) return
 
-    if (!shouldLinkPath(target)) return
+    if (!shouldLinkPath(path)) return
 
-    node.url = createFileHref(target)
+    node.url = createFileHref(path)
 }
 
 export type RemarkFilePathLinksOptions = {

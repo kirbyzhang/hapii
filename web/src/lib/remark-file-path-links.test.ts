@@ -48,6 +48,18 @@ describe('remarkFilePathLinks', () => {
         expect(links.map(linkedPath)).toEqual(['screenshot.png', 'README.md'])
     })
 
+    it.each(['dist/example.tar.gz', 'output/report.final.pdf'])(
+        'autolinks the full path of a downloadable file with multiple dots: %s',
+        (path) => {
+            const nodes = transform(`Download ${path}.`)
+            const links = nodes.filter((node) => node.type === 'link')
+
+            expect(links.map(linkedPath)).toEqual([path])
+            expect(links[0]?.children?.[0]?.value).toBe(path)
+            expect(nodes.at(-1)).toEqual({ type: 'text', value: '.' })
+        },
+    )
+
     it('autolinks Windows absolute paths as hapi-file-candidate (backslash-safe through hast)', () => {
         const nodes = transform('Open C:\\Users\\dev\\project\\handoff.md and D:/work/app/src/main.ts:12')
         const links = nodes.filter((node) => node.type === 'link')
@@ -179,6 +191,15 @@ describe('remarkFilePathLinks — explicit markdown links', () => {
         expect(linkedPath(nodes.find((n) => n.type === 'link')!)).toBe('./diagram.mmd')
     })
 
+    it.each([
+        ['reports/final%20report.pdf#page=2', 'reports/final report.pdf'],
+        ['./exports/100%25.zip', './exports/100%.zip'],
+        ['exports/budget.xlsx', 'exports/budget.xlsx'],
+    ])('routes downloadable file href %s to its actual workspace path', (url, path) => {
+        const [link] = transformNodes([linkNode(url)])
+        expect(linkedPath(link)).toBe(path)
+    })
+
     it('rewrites a relative link with a #fragment, stripping it from the target', () => {
         const nodes = transformNodes([linkNode('docs/foo.md#section')])
         expect(linkedPath(nodes.find((n) => n.type === 'link')!)).toBe('docs/foo.md')
@@ -212,6 +233,10 @@ describe('remarkFilePathLinks — explicit markdown links', () => {
         '/etc/passwd.sh',
         '~/home.md',
         '../escape.md',
+        '%2e%2e%2freport.pdf',
+        'reports%5c..%5c..%5creport.pdf',
+        '%2foutside%2freport.pdf',
+        'javascript%3Areport.pdf',
         'foo:bar.md',
         '/settings',
         './relative-route',
